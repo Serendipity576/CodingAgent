@@ -1,0 +1,23 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Agent runtime data
+.agent/logs/
+.agent/checkpoints/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.venv/
+venv/
+build/
+dist/
