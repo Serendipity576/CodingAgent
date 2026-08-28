@@ -15,5 +15,6 @@ setup(
     package_dir={"": "src"},
     packages=find_packages(where="src"),
     python_requires=">=3.10",
+    install_requires=["openai>=1.66.0"],
     entry_points={"console_scripts": ["coding-agent=agent.cli:main"]},
 )

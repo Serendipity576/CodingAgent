@@ -1,6 +1,6 @@
 """Configuration loading for the command-line application.
 
-This module deliberately contains no LLM client or tool execution logic. It only
+This module deliberately contains no LLM client or tool execution logic. It
 normalizes startup configuration and keeps credentials out of user-facing output.
 """
 
@@ -17,6 +17,7 @@ DEFAULT_MAX_STEPS = 20
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 60
 DEFAULT_MAX_OUTPUT_CHARS = 20_000
 DEFAULT_MAX_TASK_SECONDS = 900
+DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES = 2
 
 
 class ConfigurationError(ValueError):
@@ -31,6 +32,7 @@ class RuntimeLimits:
     command_timeout_seconds: int = DEFAULT_COMMAND_TIMEOUT_SECONDS
     max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS
     max_task_seconds: int = DEFAULT_MAX_TASK_SECONDS
+    max_consecutive_tool_failures: int = DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES
 
     def __post_init__(self) -> None:
         for field_name, value in (
@@ -38,6 +40,7 @@ class RuntimeLimits:
             ("command_timeout_seconds", self.command_timeout_seconds),
             ("max_output_chars", self.max_output_chars),
             ("max_task_seconds", self.max_task_seconds),
+            ("max_consecutive_tool_failures", self.max_consecutive_tool_failures),
         ):
             if value <= 0:
                 raise ConfigurationError(f"{field_name} must be greater than zero")
@@ -71,6 +74,7 @@ class Settings:
                 "command_timeout_seconds": self.limits.command_timeout_seconds,
                 "max_output_chars": self.limits.max_output_chars,
                 "max_task_seconds": self.limits.max_task_seconds,
+                "max_consecutive_tool_failures": self.limits.max_consecutive_tool_failures,
             },
         }
 
@@ -83,12 +87,13 @@ def load_settings(
     command_timeout_seconds: int | str | None = None,
     max_output_chars: int | str | None = None,
     max_task_seconds: int | str | None = None,
+    max_consecutive_tool_failures: int | str | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> Settings:
     """Load settings from explicit arguments, environment variables, and defaults.
 
     Explicit arguments take precedence over environment variables. This function
-    does not contact any external service and does not require an API key yet.
+    does not contact an external service or validate an API key.
     """
 
     # Explicit CLI values come first so a single run is reproducible and does
@@ -126,6 +131,14 @@ def load_settings(
             "max_task_seconds",
             _first_value(max_task_seconds, env.get("CODING_AGENT_MAX_TASK_SECONDS")),
             DEFAULT_MAX_TASK_SECONDS,
+        ),
+        max_consecutive_tool_failures=_positive_int(
+            "max_consecutive_tool_failures",
+            _first_value(
+                max_consecutive_tool_failures,
+                env.get("CODING_AGENT_MAX_CONSECUTIVE_TOOL_FAILURES"),
+            ),
+            DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES,
         ),
     )
     return Settings(

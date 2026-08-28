@@ -7,7 +7,10 @@ import json
 from collections.abc import Sequence
 
 from agent import __version__
+from agent.agent import CodingAgent
 from agent.config import ConfigurationError, load_settings
+from agent.llm.client import LLMConfigurationError, OpenAIResponsesClient
+from agent.tools import build_default_registry
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,27 +50,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum duration for an entire agent task.",
     )
     parser.add_argument(
+        "--max-consecutive-tool-failures",
+        type=int,
+        help="Stop after this many identical consecutive failed tool calls.",
+    )
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument(
         "--print-config",
         action="store_true",
         help="Print sanitized startup configuration and exit.",
+    )
+    action.add_argument(
+        "--task",
+        metavar="TEXT",
+        help="Coding task for the agent to complete.",
     )
     parser.add_argument("--version", action="version", version=__version__)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the P0 command-line interface.
-
-    Agent execution is intentionally not available until P1. ``--print-config``
-    provides a safe way to verify configuration without exposing credentials.
-    """
+    """Run configuration inspection or one bounded coding task."""
 
     parser = build_parser()
     arguments = parser.parse_args(argv)
 
-    # P0 has no agent runtime yet, so invoking the command without an explicit
-    # inspection request must not create a task or touch external services.
-    if not arguments.print_config:
+    # Require an explicit action so opening the CLI never starts a model request
+    # or a local command by surprise.
+    if not arguments.print_config and not arguments.task:
         parser.print_help()
         return 0
 
@@ -79,10 +89,37 @@ def main(argv: Sequence[str] | None = None) -> int:
             command_timeout_seconds=arguments.command_timeout_seconds,
             max_output_chars=arguments.max_output_chars,
             max_task_seconds=arguments.max_task_seconds,
+            max_consecutive_tool_failures=arguments.max_consecutive_tool_failures,
         )
     except ConfigurationError as error:
         parser.error(str(error))
 
-    # Use the redacted representation instead of serializing Settings directly.
-    print(json.dumps(settings.public_dict(), ensure_ascii=False, indent=2, sort_keys=True))
-    return 0
+    if arguments.print_config:
+        # Use the redacted representation instead of serializing Settings directly.
+        print(json.dumps(settings.public_dict(), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+
+    try:
+        agent = CodingAgent(
+            settings=settings,
+            llm=OpenAIResponsesClient(settings),
+            tools=build_default_registry(),
+        )
+    except LLMConfigurationError as error:
+        parser.error(str(error))
+
+    result = agent.run(arguments.task)
+    print(
+        json.dumps(
+            {
+                "status": result.status.value,
+                "steps": result.steps,
+                "message": result.message,
+                "tool_calls": len(result.tool_calls),
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0 if result.succeeded else 1
