@@ -105,7 +105,7 @@ class CodingAgentTests(unittest.TestCase):
             result = CodingAgent(
                 settings=_settings(workspace),
                 llm=llm,
-                tools=build_default_registry(),
+                tools=build_default_registry(workspace),
             ).run("Fix the failing test.")
 
             self.assertEqual(result.status, TaskStatus.COMPLETED)
@@ -139,7 +139,7 @@ class CodingAgentTests(unittest.TestCase):
             result = CodingAgent(
                 settings=_settings(workspace),
                 llm=llm,
-                tools=build_default_registry(),
+                tools=build_default_registry(workspace),
             ).run("Read the missing file.")
 
             self.assertEqual(result.status, TaskStatus.REPEATED_TOOL_FAILURE)

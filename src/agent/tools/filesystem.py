@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
+from agent.security.path_guard import PathAccessError, WorkspacePathGuard
 from agent.tools.base import ToolContext, ToolError, ToolResult, truncate_text
 
 
@@ -14,22 +15,12 @@ def resolve_workspace_path(context: ToolContext, requested_path: object) -> Path
     if not isinstance(requested_path, str) or not requested_path.strip():
         raise ToolError("path must be a non-empty string")
 
-    root = context.workspace.resolve()
-    candidate = Path(requested_path).expanduser()
-    if not candidate.is_absolute():
-        candidate = root / candidate
     try:
-        resolved = candidate.resolve(strict=False)
-    except RuntimeError as error:
-        raise ToolError(f"could not resolve path: {error}") from error
-
-    # This is a basic P1 workspace boundary. P2 will add dedicated policy,
-    # sensitive-data, and adversarial symlink coverage around every operation.
-    try:
-        resolved.relative_to(root)
-    except ValueError as error:
-        raise ToolError("path must remain inside the workspace") from error
-    return resolved
+        return WorkspacePathGuard(context.workspace).resolve(requested_path)
+    except PathAccessError as error:
+        # The registry runs the same check before this function. Rechecking at
+        # execution time prevents a later path change from bypassing the guard.
+        raise ToolError(str(error)) from error
 
 
 def _required_string(arguments: Mapping[str, object], name: str) -> str:

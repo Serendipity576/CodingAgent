@@ -3,16 +3,27 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from dataclasses import replace
 
 from agent.llm.models import ToolCall
+from agent.security.approval import ApprovalHandler, DenyAllApproval
+from agent.security.policy import Decision, PolicyDecision, PolicyEngine
 from agent.tools.base import Tool, ToolContext, ToolError, ToolResult
 
 
 class ToolRegistry:
     """The only runtime entry point for invoking registered tools."""
 
-    def __init__(self, tools: Iterable[Tool]) -> None:
+    def __init__(
+        self,
+        tools: Iterable[Tool],
+        *,
+        policy: PolicyEngine,
+        approval: ApprovalHandler | None = None,
+    ) -> None:
         self._tools: dict[str, Tool] = {}
+        self._policy = policy
+        self._approval = approval or DenyAllApproval()
         for tool in tools:
             if tool.name in self._tools:
                 raise ValueError(f"duplicate tool name: {tool.name}")
@@ -37,18 +48,42 @@ class ToolRegistry:
     def execute(self, call: ToolCall, context: ToolContext) -> ToolResult:
         """Execute one call, converting ordinary input failures into observations."""
 
-        if call.arguments_error:
-            return ToolResult.failed(call.arguments_error)
-        if call.arguments is None:
-            return ToolResult.failed("tool arguments are required")
+        decision = self._policy.evaluate(call)
+        if decision.decision is Decision.DENY:
+            return self._blocked_result(decision, "policy denied tool call")
+        if decision.decision is Decision.REQUIRE_APPROVAL:
+            if not self._approval.request(call, decision):
+                return self._blocked_result(decision, "user did not approve tool call")
 
         tool = self._tools.get(call.name)
         if tool is None:
+            # This should only be reachable when a custom policy deliberately
+            # permits a tool that was not actually registered.
             return ToolResult.failed(f"unknown tool: {call.name}")
 
         try:
-            return tool.execute(call.arguments, context)
+            result = tool.execute(call.arguments or {}, context)
         except ToolError as error:
-            return ToolResult.failed(str(error))
+            result = ToolResult.failed(str(error))
         except Exception as error:  # Keep a tool bug from crashing the whole task.
-            return ToolResult.failed(f"internal tool error: {error}")
+            result = ToolResult.failed(f"internal tool error: {error}")
+
+        # Keep the policy trace with normal results so P3 audit logging can use
+        # the same object rather than reconstructing a security decision later.
+        return replace(
+            result,
+            decision=decision.decision.value,
+            risk=decision.risk.value,
+            policy=decision.policy,
+        )
+
+    @staticmethod
+    def _blocked_result(decision: PolicyDecision, prefix: str) -> ToolResult:
+        """Turn a denied or unapproved request into an LLM-visible observation."""
+
+        return ToolResult.failed(
+            f"{prefix}: {decision.reason}",
+            decision=decision.decision.value,
+            risk=decision.risk.value,
+            policy=decision.policy,
+        )

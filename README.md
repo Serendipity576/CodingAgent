@@ -4,7 +4,7 @@ A coding agent with workspace-bounded local tools, deterministic policy checks, 
 
 ## Current status
 
-P1 (the minimal Agent loop) is complete. It supports model function calls, file tools, focused text patches, local commands, runtime limits, and a multi-turn task loop. P2 will add the complete safety policy and approval flow.
+P2 (the local safety boundary) is complete. The agent now gates every tool call through a deterministic policy, constrains filesystem access to the workspace, protects common credential paths, and requests approval for high-risk commands. P3 will add audit logs and change tracking.
 
 ## Quick start
 
@@ -29,7 +29,15 @@ coding-agent --workspace /path/to/project --task "Fix the failing tests."
 
 The model may use `list_files`, `read_file`, `apply_patch`, and `run_command`. `apply_patch` replaces one exact, unique text fragment; `run_command` accepts an executable and arguments rather than shell syntax.
 
-> P1 is not the final security boundary. Its workspace check and runtime limits are basic safeguards only. Do not use it on repositories containing credentials or important uncommitted work until P2 adds sensitive-file protection, command policy, and approval handling.
+## Safety boundary
+
+Every tool request receives one deterministic decision:
+
+- `ALLOW`: standard reads, tests, and workspace edits execute automatically;
+- `REQUIRE_APPROVAL`: deletion, dependency management, network-capable commands, destructive Git operations, and unknown executables require an interactive `y`/`yes` confirmation;
+- `DENY`: workspace escape, sensitive files, `sudo`, shutdown/reboot, formatting, and similar critical actions never execute.
+
+The path guard resolves real paths before checking containment, so `../`, absolute escape, and symlink escape are rejected. Common credential paths such as `.env`, private keys, `credentials`, and `secrets` are also denied. P2 is rule-based rather than a complete static analyzer; it is not container isolation and P3 audit logging is still pending.
 
 ## Configuration
 

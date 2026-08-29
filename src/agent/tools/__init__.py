@@ -1,12 +1,18 @@
 """Default tool set for the minimal coding-agent loop."""
 
+from pathlib import Path
+
+from agent.security.approval import ApprovalHandler
+from agent.security.policy import PolicyEngine
 from agent.tools.filesystem import ApplyPatchTool, ListFilesTool, ReadFileTool
 from agent.tools.registry import ToolRegistry
 from agent.tools.shell import RunCommandTool
 
 
-def build_default_registry() -> ToolRegistry:
-    """Create a fresh registry so each agent run has explicit dependencies."""
+def build_default_registry(
+    workspace: Path, *, approval: ApprovalHandler | None = None
+) -> ToolRegistry:
+    """Create a gated registry with an explicit workspace policy dependency."""
 
     return ToolRegistry(
         [
@@ -14,7 +20,9 @@ def build_default_registry() -> ToolRegistry:
             ReadFileTool(),
             ApplyPatchTool(),
             RunCommandTool(),
-        ]
+        ],
+        policy=PolicyEngine(workspace),
+        approval=approval,
     )
 
 

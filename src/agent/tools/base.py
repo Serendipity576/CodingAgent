@@ -30,14 +30,32 @@ class ToolResult:
     success: bool
     output: str
     error: str | None = None
+    decision: str | None = None
+    risk: str | None = None
+    policy: str | None = None
 
     @classmethod
     def succeeded(cls, output: str) -> "ToolResult":
         return cls(success=True, output=output)
 
     @classmethod
-    def failed(cls, error: str, output: str = "") -> "ToolResult":
-        return cls(success=False, output=output, error=error)
+    def failed(
+        cls,
+        error: str,
+        output: str = "",
+        *,
+        decision: str | None = None,
+        risk: str | None = None,
+        policy: str | None = None,
+    ) -> "ToolResult":
+        return cls(
+            success=False,
+            output=output,
+            error=error,
+            decision=decision,
+            risk=risk,
+            policy=policy,
+        )
 
     def as_observation(self) -> str:
         """Encode the result in the function-output format expected by the LLM."""
@@ -45,6 +63,12 @@ class ToolResult:
         payload: dict[str, object] = {"ok": self.success, "output": self.output}
         if self.error:
             payload["error"] = self.error
+        if self.decision:
+            payload["security"] = {
+                "decision": self.decision,
+                "risk": self.risk,
+                "policy": self.policy,
+            }
         return json.dumps(payload, ensure_ascii=False)
 
 

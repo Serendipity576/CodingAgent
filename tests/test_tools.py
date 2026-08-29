@@ -6,6 +6,7 @@ import unittest
 
 from agent.config import RuntimeLimits
 from agent.llm.models import ToolCall
+from agent.security.policy import PolicyEngine
 from agent.tools.base import ToolContext
 from agent.tools.filesystem import ApplyPatchTool, ReadFileTool
 from agent.tools.registry import ToolRegistry
@@ -19,7 +20,9 @@ class FilesystemToolTests(unittest.TestCase):
             target.write_text("first\nfirst\n", encoding="utf-8")
             context = _context(workspace)
 
-            result = ToolRegistry([ApplyPatchTool()]).execute(
+            result = ToolRegistry(
+                [ApplyPatchTool()], policy=PolicyEngine(workspace)
+            ).execute(
                 ToolCall(
                     call_id="call-1",
                     name="apply_patch",

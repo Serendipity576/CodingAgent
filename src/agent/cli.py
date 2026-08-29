@@ -10,6 +10,7 @@ from agent import __version__
 from agent.agent import CodingAgent
 from agent.config import ConfigurationError, load_settings
 from agent.llm.client import LLMConfigurationError, OpenAIResponsesClient
+from agent.security.approval import ConsoleApproval
 from agent.tools import build_default_registry
 
 
@@ -103,7 +104,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         agent = CodingAgent(
             settings=settings,
             llm=OpenAIResponsesClient(settings),
-            tools=build_default_registry(),
+            # High-risk requests are approved at the terminal by the person
+            # running this exact task; non-interactive use denies them by default.
+            tools=build_default_registry(
+                settings.workspace,
+                approval=ConsoleApproval(),
+            ),
         )
     except LLMConfigurationError as error:
         parser.error(str(error))
