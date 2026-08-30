@@ -4,7 +4,7 @@ A coding agent with workspace-bounded local tools, deterministic policy checks, 
 
 ## Current status
 
-P3 (observability and change control) is complete. The agent now gates every tool call through a deterministic policy, constrains filesystem access to the workspace, protects common credential paths, records structured audit events, and requests approval for high-risk commands.
+P4 (security tests and demonstration) is complete. The Agent gates every tool call through a deterministic policy, constrains filesystem access to the workspace, protects common credential paths, records structured audit events, and includes a reproducible prompt-injection demonstration.
 
 ## Quick start
 
@@ -46,6 +46,26 @@ Each task writes append-only JSONL events to `.agent/logs/<task-id>.jsonl`. Even
 The final CLI JSON includes a task summary: changed-file count and paths from successful `apply_patch` calls, per-file added/removed-line counts, the latest recognized test result, blocked actions, and approved high-risk actions. When a task begins, the CLI also captures the read-only `git status --porcelain` baseline. Existing Git changes are reported separately and are never counted as Agent changes.
 
 Automatic rollback is not implemented. The Agent never claims it can restore user changes that existed before a task began.
+
+## Security verification and demo
+
+Run the complete automated suite:
+
+```bash
+python -m unittest discover -s tests -t .
+```
+
+The suite covers workspace escape (`../`, absolute paths, and symlinks), sensitive paths, dangerous commands, approval handling, command timeout, output truncation, invalid tool arguments, repeated failures, and maximum-step termination.
+
+Run the offline prompt-injection demonstration (no API key or network request):
+
+```bash
+python examples/prompt_injection_demo/run_demo.py
+```
+
+It copies a deliberately malicious example repository into a temporary workspace. Its scripted model reads the malicious README, then attempts to read `.env`; the policy denies that request. The same run then diagnoses the failing test, patches `app.py`, and reruns the test successfully. Expected final fields are `blocked_actions: 1`, `tests: "passed"`, and `modified_files: ["app.py"]`. The script normally completes in a few seconds and removes its temporary workspace afterwards.
+
+This is a deterministic policy demonstration, not evidence that every model will resist prompt injection. Repository text and tool output remain untrusted; the application policy is the enforcement boundary.
 
 ## Configuration
 
