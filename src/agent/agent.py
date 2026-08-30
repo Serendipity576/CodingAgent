@@ -5,12 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import json
+from pathlib import Path
 from time import monotonic
 
+from agent.audit import AuditLogger
+from agent.change_tracker import GitStatusSnapshot
 from agent.config import Settings
 from agent.context import TaskContext
 from agent.llm.client import LLMClient, LLMRequestError
 from agent.llm.models import ToolCall, ToolOutput
+from agent.summary import TaskSummary, build_task_summary
 from agent.tools.base import ToolContext, ToolResult
 from agent.tools.registry import ToolRegistry
 
@@ -41,6 +45,9 @@ class TaskResult:
     message: str
     steps: int
     tool_calls: tuple[ExecutedToolCall, ...]
+    task_id: str | None = None
+    audit_log: Path | None = None
+    summary: TaskSummary | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -50,10 +57,20 @@ class TaskResult:
 class CodingAgent:
     """Coordinate model turns and tool results while enforcing runtime limits."""
 
-    def __init__(self, settings: Settings, llm: LLMClient, tools: ToolRegistry) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        llm: LLMClient,
+        tools: ToolRegistry,
+        *,
+        audit_logger: AuditLogger | None = None,
+        git_baseline: GitStatusSnapshot | None = None,
+    ) -> None:
         self._settings = settings
         self._llm = llm
         self._tools = tools
+        self._audit_logger = audit_logger
+        self._git_baseline = git_baseline
 
     def run(self, task: str) -> TaskResult:
         """Run one task until the model finishes or a deterministic limit stops it."""
@@ -63,6 +80,13 @@ class CodingAgent:
             workspace=self._settings.workspace,
             limits=self._settings.limits,
         )
+        audit_logger = self._audit_logger or AuditLogger.create(self._settings.workspace)
+        git_baseline = self._git_baseline or GitStatusSnapshot.capture(
+            self._settings.workspace
+        )
+        if audit_logger is not None:
+            audit_logger.task_started(task_context.task, git_baseline)
+
         started_at = monotonic()
         previous_response_id: str | None = None
         next_task: str | None = task_context.task
@@ -72,13 +96,35 @@ class CodingAgent:
         last_failure_signature: str | None = None
         consecutive_failures = 0
 
+        def finish(status: TaskStatus, message: str) -> TaskResult:
+            """Attach the run's audit facts whenever a terminal state is reached."""
+
+            summary = build_task_summary(
+                [(item.call, item.result) for item in executed], git_baseline
+            )
+            result = TaskResult(
+                status=status,
+                message=message,
+                steps=steps,
+                tool_calls=tuple(executed),
+                task_id=audit_logger.task_id if audit_logger else None,
+                audit_log=audit_logger.path if audit_logger else None,
+                summary=summary,
+            )
+            if audit_logger is not None:
+                audit_logger.task_finished(
+                    status=status.value,
+                    message=message,
+                    steps=steps,
+                    summary=summary,
+                )
+            return result
+
         while True:
             if self._task_timed_out(started_at):
-                return self._result(
+                return finish(
                     TaskStatus.TASK_TIMEOUT,
                     "task time limit reached before the next model turn",
-                    steps,
-                    executed,
                 )
 
             try:
@@ -90,38 +136,41 @@ class CodingAgent:
                     tool_outputs=pending_outputs,
                 )
             except LLMRequestError as error:
-                return self._result(TaskStatus.LLM_ERROR, str(error), steps, executed)
+                return finish(TaskStatus.LLM_ERROR, str(error))
 
             previous_response_id = response.response_id
             next_task = None
             if not response.tool_calls:
-                return self._result(
+                return finish(
                     TaskStatus.COMPLETED,
                     response.text or "agent completed without a final message",
-                    steps,
-                    executed,
                 )
 
             outputs: list[ToolOutput] = []
             for call in response.tool_calls:
                 if steps >= self._settings.limits.max_steps:
-                    return self._result(
+                    return finish(
                         TaskStatus.MAX_STEPS_REACHED,
                         "maximum tool-call steps reached",
-                        steps,
-                        executed,
                     )
                 if self._task_timed_out(started_at):
-                    return self._result(
+                    return finish(
                         TaskStatus.TASK_TIMEOUT,
                         "task time limit reached before the next tool call",
-                        steps,
-                        executed,
                     )
 
                 steps += 1
+                tool_started_at = monotonic()
                 result = self._tools.execute(call, tool_context)
+                duration_ms = int((monotonic() - tool_started_at) * 1000)
                 executed.append(ExecutedToolCall(call=call, result=result))
+                if audit_logger is not None:
+                    audit_logger.tool_executed(
+                        step=steps,
+                        call=call,
+                        result=result,
+                        duration_ms=duration_ms,
+                    )
                 outputs.append(ToolOutput(call_id=call.call_id, output=result.as_observation()))
 
                 if result.success:
@@ -139,31 +188,15 @@ class CodingAgent:
                     consecutive_failures
                     >= self._settings.limits.max_consecutive_tool_failures
                 ):
-                    return self._result(
+                    return finish(
                         TaskStatus.REPEATED_TOOL_FAILURE,
                         "the same tool call failed repeatedly",
-                        steps,
-                        executed,
                     )
 
             pending_outputs = tuple(outputs)
 
     def _task_timed_out(self, started_at: float) -> bool:
         return monotonic() - started_at >= self._settings.limits.max_task_seconds
-
-    @staticmethod
-    def _result(
-        status: TaskStatus,
-        message: str,
-        steps: int,
-        executed: list[ExecutedToolCall],
-    ) -> TaskResult:
-        return TaskResult(
-            status=status,
-            message=message,
-            steps=steps,
-            tool_calls=tuple(executed),
-        )
 
 
 def _call_signature(call: ToolCall) -> str:

@@ -4,7 +4,7 @@ A coding agent with workspace-bounded local tools, deterministic policy checks, 
 
 ## Current status
 
-P2 (the local safety boundary) is complete. The agent now gates every tool call through a deterministic policy, constrains filesystem access to the workspace, protects common credential paths, and requests approval for high-risk commands. P3 will add audit logs and change tracking.
+P3 (observability and change control) is complete. The agent now gates every tool call through a deterministic policy, constrains filesystem access to the workspace, protects common credential paths, records structured audit events, and requests approval for high-risk commands.
 
 ## Quick start
 
@@ -37,7 +37,15 @@ Every tool request receives one deterministic decision:
 - `REQUIRE_APPROVAL`: deletion, dependency management, network-capable commands, destructive Git operations, and unknown executables require an interactive `y`/`yes` confirmation;
 - `DENY`: workspace escape, sensitive files, `sudo`, shutdown/reboot, formatting, and similar critical actions never execute.
 
-The path guard resolves real paths before checking containment, so `../`, absolute escape, and symlink escape are rejected. Common credential paths such as `.env`, private keys, `credentials`, and `secrets` are also denied. P2 is rule-based rather than a complete static analyzer; it is not container isolation and P3 audit logging is still pending.
+The path guard resolves real paths before checking containment, so `../`, absolute escape, and symlink escape are rejected. Common credential paths such as `.env`, private keys, `credentials`, and `secrets` are also denied. The policy is rule-based rather than a complete static analyzer, and it is not container isolation.
+
+## Audit and change summary
+
+Each task writes append-only JSONL events to `.agent/logs/<task-id>.jsonl`. Events record the task, tool name, policy decision, risk, duration, exit metadata, and the final outcome. File bodies, patch text, and tool output are intentionally excluded from the audit log.
+
+The final CLI JSON includes a task summary: changed-file count and paths from successful `apply_patch` calls, per-file added/removed-line counts, the latest recognized test result, blocked actions, and approved high-risk actions. When a task begins, the CLI also captures the read-only `git status --porcelain` baseline. Existing Git changes are reported separately and are never counted as Agent changes.
+
+Automatic rollback is not implemented. The Agent never claims it can restore user changes that existed before a task began.
 
 ## Configuration
 

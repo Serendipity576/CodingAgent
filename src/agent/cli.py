@@ -8,6 +8,8 @@ from collections.abc import Sequence
 
 from agent import __version__
 from agent.agent import CodingAgent
+from agent.audit import AuditLogger
+from agent.change_tracker import GitStatusSnapshot
 from agent.config import ConfigurationError, load_settings
 from agent.llm.client import LLMConfigurationError, OpenAIResponsesClient
 from agent.security.approval import ConsoleApproval
@@ -101,15 +103,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     try:
+        llm = OpenAIResponsesClient(settings)
+        audit_logger = AuditLogger.create(settings.workspace)
+        git_baseline = GitStatusSnapshot.capture(settings.workspace)
         agent = CodingAgent(
             settings=settings,
-            llm=OpenAIResponsesClient(settings),
+            llm=llm,
             # High-risk requests are approved at the terminal by the person
             # running this exact task; non-interactive use denies them by default.
             tools=build_default_registry(
                 settings.workspace,
                 approval=ConsoleApproval(),
             ),
+            audit_logger=audit_logger,
+            git_baseline=git_baseline,
         )
     except LLMConfigurationError as error:
         parser.error(str(error))
@@ -122,6 +129,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "steps": result.steps,
                 "message": result.message,
                 "tool_calls": len(result.tool_calls),
+                "task_id": result.task_id,
+                "audit_log": str(result.audit_log) if result.audit_log else None,
+                "summary": result.summary.as_dict() if result.summary else None,
             },
             ensure_ascii=False,
             indent=2,

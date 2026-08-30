@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
 from typing import Protocol
@@ -33,10 +33,13 @@ class ToolResult:
     decision: str | None = None
     risk: str | None = None
     policy: str | None = None
+    metadata: Mapping[str, object] = field(default_factory=dict)
 
     @classmethod
-    def succeeded(cls, output: str) -> "ToolResult":
-        return cls(success=True, output=output)
+    def succeeded(
+        cls, output: str, *, metadata: Mapping[str, object] | None = None
+    ) -> "ToolResult":
+        return cls(success=True, output=output, metadata=metadata or {})
 
     @classmethod
     def failed(
@@ -47,6 +50,7 @@ class ToolResult:
         decision: str | None = None,
         risk: str | None = None,
         policy: str | None = None,
+        metadata: Mapping[str, object] | None = None,
     ) -> "ToolResult":
         return cls(
             success=False,
@@ -55,6 +59,7 @@ class ToolResult:
             decision=decision,
             risk=risk,
             policy=policy,
+            metadata=metadata or {},
         )
 
     def as_observation(self) -> str:

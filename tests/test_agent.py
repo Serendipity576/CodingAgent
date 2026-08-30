@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 from agent.agent import CodingAgent, TaskStatus
+from agent.change_tracker import GitStatusSnapshot
 from agent.config import RuntimeLimits, Settings
 from agent.llm.models import ModelResponse, ToolCall, ToolOutput
 from agent.tools import build_default_registry
@@ -106,6 +107,7 @@ class CodingAgentTests(unittest.TestCase):
                 settings=_settings(workspace),
                 llm=llm,
                 tools=build_default_registry(workspace),
+                git_baseline=GitStatusSnapshot.unavailable("test baseline"),
             ).run("Fix the failing test.")
 
             self.assertEqual(result.status, TaskStatus.COMPLETED)
@@ -121,6 +123,15 @@ class CodingAgentTests(unittest.TestCase):
             self.assertIn("return left + right", (workspace / "app.py").read_text())
             self.assertIsNone(llm.requests[0]["previous_response_id"])
             self.assertEqual(llm.requests[1]["previous_response_id"], "response-1")
+            self.assertIsNotNone(result.summary)
+            assert result.summary is not None
+            self.assertEqual(result.summary.modified_files, ("app.py",))
+            self.assertEqual(result.summary.tests, "passed")
+            self.assertFalse(result.summary.git_baseline_available)
+            self.assertIsNotNone(result.audit_log)
+            assert result.audit_log is not None
+            self.assertTrue(result.audit_log.exists())
+            self.assertIn("task_finished", result.audit_log.read_text(encoding="utf-8"))
 
     def test_repeated_failed_call_stops_the_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -140,6 +151,7 @@ class CodingAgentTests(unittest.TestCase):
                 settings=_settings(workspace),
                 llm=llm,
                 tools=build_default_registry(workspace),
+                git_baseline=GitStatusSnapshot.unavailable("test baseline"),
             ).run("Read the missing file.")
 
             self.assertEqual(result.status, TaskStatus.REPEATED_TOOL_FAILURE)

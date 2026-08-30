@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from difflib import unified_diff
 from pathlib import Path
 
 from agent.security.path_guard import PathAccessError, WorkspacePathGuard
@@ -177,18 +178,41 @@ class ApplyPatchTool:
                     raise ToolError("expected_text was not found in the file")
                 if matches > 1:
                     raise ToolError("expected_text must occur exactly once")
-                target.write_text(
-                    original.replace(expected_text, replacement_text, 1), encoding="utf-8"
-                )
+                updated = original.replace(expected_text, replacement_text, 1)
+                target.write_text(updated, encoding="utf-8")
                 action = "updated"
+                diff_summary = _diff_summary(original, updated)
             else:
                 if expected_text:
                     raise ToolError("expected_text must be empty when creating a file")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(replacement_text, encoding="utf-8")
                 action = "created"
+                diff_summary = _diff_summary("", replacement_text)
         except OSError as error:
             raise ToolError(f"could not write file: {error}") from error
 
         relative = target.relative_to(context.workspace.resolve()).as_posix()
-        return ToolResult.succeeded(f"{action} {relative}")
+        return ToolResult.succeeded(
+            f"{action} {relative}",
+            metadata={
+                "path": relative,
+                "change_type": action,
+                "diff_summary": diff_summary,
+            },
+        )
+
+
+def _diff_summary(before: str, after: str) -> dict[str, int]:
+    """Count changed lines without placing full source code in the audit trail."""
+
+    added_lines = 0
+    removed_lines = 0
+    for line in unified_diff(before.splitlines(), after.splitlines(), lineterm=""):
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            added_lines += 1
+        elif line.startswith("-"):
+            removed_lines += 1
+    return {"added_lines": added_lines, "removed_lines": removed_lines}

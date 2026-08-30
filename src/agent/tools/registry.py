@@ -51,9 +51,15 @@ class ToolRegistry:
         decision = self._policy.evaluate(call)
         if decision.decision is Decision.DENY:
             return self._blocked_result(decision, "policy denied tool call")
+        approval_metadata: dict[str, str] = {}
         if decision.decision is Decision.REQUIRE_APPROVAL:
             if not self._approval.request(call, decision):
-                return self._blocked_result(decision, "user did not approve tool call")
+                return self._blocked_result(
+                    decision,
+                    "user did not approve tool call",
+                    metadata={"approval": "rejected"},
+                )
+            approval_metadata["approval"] = "approved"
 
         tool = self._tools.get(call.name)
         if tool is None:
@@ -75,10 +81,16 @@ class ToolRegistry:
             decision=decision.decision.value,
             risk=decision.risk.value,
             policy=decision.policy,
+            metadata={**result.metadata, **approval_metadata},
         )
 
     @staticmethod
-    def _blocked_result(decision: PolicyDecision, prefix: str) -> ToolResult:
+    def _blocked_result(
+        decision: PolicyDecision,
+        prefix: str,
+        *,
+        metadata: Mapping[str, object] | None = None,
+    ) -> ToolResult:
         """Turn a denied or unapproved request into an LLM-visible observation."""
 
         return ToolResult.failed(
@@ -86,4 +98,5 @@ class ToolRegistry:
             decision=decision.decision.value,
             risk=decision.risk.value,
             policy=decision.policy,
+            metadata=metadata,
         )

@@ -49,7 +49,11 @@ class RunCommandTool:
                 status=f"timed out after {context.limits.command_timeout_seconds} seconds",
                 limit=context.limits.max_output_chars,
             )
-            return ToolResult.failed("command timed out", output)
+            return ToolResult.failed(
+                "command timed out",
+                output,
+                metadata={"timed_out": True},
+            )
         except OSError as error:
             return ToolResult.failed(f"could not start command: {error}")
 
@@ -60,8 +64,12 @@ class RunCommandTool:
             limit=context.limits.max_output_chars,
         )
         if completed.returncode != 0:
-            return ToolResult.failed(f"command exited with code {completed.returncode}", output)
-        return ToolResult.succeeded(output)
+            return ToolResult.failed(
+                f"command exited with code {completed.returncode}",
+                output,
+                metadata={"exit_code": completed.returncode},
+            )
+        return ToolResult.succeeded(output, metadata={"exit_code": completed.returncode})
 
 
 def _command_argument(arguments: Mapping[str, object]) -> list[str]:
