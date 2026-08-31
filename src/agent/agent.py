@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 import json
@@ -27,6 +28,7 @@ class TaskStatus(str, Enum):
     TASK_TIMEOUT = "task_timeout"
     REPEATED_TOOL_FAILURE = "repeated_tool_failure"
     LLM_ERROR = "llm_error"
+    CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,12 +67,16 @@ class CodingAgent:
         *,
         audit_logger: AuditLogger | None = None,
         git_baseline: GitStatusSnapshot | None = None,
+        event_callback: Callable[[str, Mapping[str, object]], None] | None = None,
+        cancellation: object | None = None,
     ) -> None:
         self._settings = settings
         self._llm = llm
         self._tools = tools
         self._audit_logger = audit_logger
         self._git_baseline = git_baseline
+        self._event_callback = event_callback
+        self._cancellation = cancellation
 
     def run(self, task: str) -> TaskResult:
         """Run one task until the model finishes or a deterministic limit stops it."""
@@ -79,6 +85,7 @@ class CodingAgent:
         tool_context = ToolContext(
             workspace=self._settings.workspace,
             limits=self._settings.limits,
+            cancelled=self._cancellation if _is_cancellation_check(self._cancellation) else None,
         )
         audit_logger = self._audit_logger or AuditLogger.create(self._settings.workspace)
         git_baseline = self._git_baseline or GitStatusSnapshot.capture(
@@ -86,6 +93,7 @@ class CodingAgent:
         )
         if audit_logger is not None:
             audit_logger.task_started(task_context.task, git_baseline)
+        self._emit("turn_started", {"task": task_context.task})
 
         started_at = monotonic()
         next_task: str | None = task_context.task
@@ -117,6 +125,10 @@ class CodingAgent:
                     steps=steps,
                     summary=summary,
                 )
+            self._emit(
+                "agent_finished",
+                {"status": status.value, "message": message, "steps": steps},
+            )
             return result
 
         while True:
@@ -125,8 +137,11 @@ class CodingAgent:
                     TaskStatus.TASK_TIMEOUT,
                     "task time limit reached before the next model turn",
                 )
+            if self._is_cancelled():
+                return finish(TaskStatus.CANCELLED, "task cancelled before the next model turn")
 
             try:
+                self._emit("llm_request_started", {"step": steps + 1})
                 response = self._llm.respond(
                     instructions=task_context.instructions,
                     task=next_task,
@@ -138,6 +153,7 @@ class CodingAgent:
 
             next_task = None
             if not response.tool_calls:
+                self._emit("assistant_message", {"text": response.text or ""})
                 return finish(
                     TaskStatus.COMPLETED,
                     response.text or "agent completed without a final message",
@@ -145,6 +161,14 @@ class CodingAgent:
 
             outputs: list[ToolOutput] = []
             for call in response.tool_calls:
+                self._emit(
+                    "tool_requested",
+                    {
+                        "call_id": call.call_id,
+                        "tool": call.name,
+                        "arguments": _event_argument_summary(call),
+                    },
+                )
                 if steps >= self._settings.limits.max_steps:
                     return finish(
                         TaskStatus.MAX_STEPS_REACHED,
@@ -155,6 +179,8 @@ class CodingAgent:
                         TaskStatus.TASK_TIMEOUT,
                         "task time limit reached before the next tool call",
                     )
+                if self._is_cancelled():
+                    return finish(TaskStatus.CANCELLED, "task cancelled before tool execution")
 
                 steps += 1
                 tool_started_at = monotonic()
@@ -168,6 +194,20 @@ class CodingAgent:
                         result=result,
                         duration_ms=duration_ms,
                     )
+                self._emit(
+                    "tool_finished",
+                    {
+                        "call_id": call.call_id,
+                        "tool": call.name,
+                        "success": result.success,
+                        "error": result.error,
+                        "decision": result.decision,
+                        "risk": result.risk,
+                        "policy": result.policy,
+                        "duration_ms": duration_ms,
+                        "output_chars": len(result.output),
+                    },
+                )
                 outputs.append(ToolOutput(call_id=call.call_id, output=result.as_observation()))
 
                 if result.success:
@@ -195,6 +235,22 @@ class CodingAgent:
     def _task_timed_out(self, started_at: float) -> bool:
         return monotonic() - started_at >= self._settings.limits.max_task_seconds
 
+    def _is_cancelled(self) -> bool:
+        """Read a cooperative cancellation event without coupling to threading."""
+
+        return _is_cancellation_check(self._cancellation) and self._cancellation.is_set()
+
+    def _emit(self, event: str, details: Mapping[str, object]) -> None:
+        """Publish safe runtime facts without making observers part of execution."""
+
+        if self._event_callback is None:
+            return
+        try:
+            self._event_callback(event, details)
+        except Exception:
+            # UI and terminal observers must never weaken the Agent loop.
+            return
+
 
 def _call_signature(call: ToolCall) -> str:
     """Create a stable identity for consecutive failed-call detection."""
@@ -209,3 +265,33 @@ def _call_signature(call: ToolCall) -> str:
         sort_keys=True,
         default=str,
     )
+
+
+def _is_cancellation_check(value: object | None) -> bool:
+    """Accept event-like cancellation objects without importing threading types."""
+
+    return callable(getattr(value, "is_set", None))
+
+
+def _event_argument_summary(call: ToolCall) -> dict[str, object]:
+    """Expose approval-relevant arguments without streaming file or patch bodies."""
+
+    arguments = call.arguments or {}
+    if call.name in {"list_files", "read_file"}:
+        return {"path": arguments.get("path")}
+    if call.name == "apply_patch":
+        return {
+            "path": arguments.get("path"),
+            "expected_text_chars": _text_length(arguments.get("expected_text")),
+            "replacement_text_chars": _text_length(arguments.get("replacement_text")),
+        }
+    if call.name == "run_command":
+        command = arguments.get("command")
+        return {"command": command if isinstance(command, list) else None}
+    return {"argument_keys": sorted(arguments.keys())}
+
+
+def _text_length(value: object) -> int | None:
+    """Report a text length without copying its content into an event stream."""
+
+    return len(value) if isinstance(value, str) else None

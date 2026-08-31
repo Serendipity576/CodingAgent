@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
+import os
+import signal
 import subprocess
+from time import monotonic
 
 from agent.tools.base import ToolContext, ToolError, ToolResult, truncate_text
 
@@ -31,45 +34,99 @@ class RunCommandTool:
         self, arguments: Mapping[str, object], context: ToolContext
     ) -> ToolResult:
         command = _command_argument(arguments)
+        process_options: dict[str, object] = {
+            "cwd": context.workspace,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "text": True,
+        }
+        if os.name == "posix":
+            # A separate process group lets cancellation stop child processes
+            # started by an otherwise allowed test or build command.
+            process_options["start_new_session"] = True
         try:
-            completed = subprocess.run(
-                command,
-                cwd=context.workspace,
-                capture_output=True,
-                check=False,
-                encoding="utf-8",
-                errors="replace",
-                text=True,
-                timeout=context.limits.command_timeout_seconds,
-            )
-        except subprocess.TimeoutExpired as error:
-            output = _command_output(
-                stdout=_as_text(error.stdout),
-                stderr=_as_text(error.stderr),
-                status=f"timed out after {context.limits.command_timeout_seconds} seconds",
-                limit=context.limits.max_output_chars,
-            )
-            return ToolResult.failed(
-                "command timed out",
-                output,
-                metadata={"timed_out": True},
-            )
+            process = subprocess.Popen(command, **process_options)
         except OSError as error:
             return ToolResult.failed(f"could not start command: {error}")
 
+        started_at = monotonic()
+        while True:
+            if context.cancelled is not None and context.cancelled.is_set():
+                stdout, stderr = _stop_process(process)
+                return ToolResult.failed(
+                    "command cancelled",
+                    _command_output(
+                        stdout=stdout,
+                        stderr=stderr,
+                        status="cancelled by user",
+                        limit=context.limits.max_output_chars,
+                    ),
+                    metadata={"cancelled": True},
+                )
+            elapsed = monotonic() - started_at
+            remaining = context.limits.command_timeout_seconds - elapsed
+            if remaining <= 0:
+                stdout, stderr = _stop_process(process)
+                return _timeout_result(stdout, stderr, context)
+            try:
+                stdout, stderr = process.communicate(timeout=min(0.1, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+
         output = _command_output(
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-            status=f"exit code: {completed.returncode}",
+            stdout=stdout,
+            stderr=stderr,
+            status=f"exit code: {process.returncode}",
             limit=context.limits.max_output_chars,
         )
-        if completed.returncode != 0:
+        if process.returncode != 0:
             return ToolResult.failed(
-                f"command exited with code {completed.returncode}",
+                f"command exited with code {process.returncode}",
                 output,
-                metadata={"exit_code": completed.returncode},
+                metadata={"exit_code": process.returncode},
             )
-        return ToolResult.succeeded(output, metadata={"exit_code": completed.returncode})
+        return ToolResult.succeeded(output, metadata={"exit_code": process.returncode})
+
+
+def _timeout_result(stdout: str, stderr: str, context: ToolContext) -> ToolResult:
+    """Return a normal observation for a command stopped at its time limit."""
+
+    output = _command_output(
+        stdout=stdout,
+        stderr=stderr,
+        status=f"timed out after {context.limits.command_timeout_seconds} seconds",
+        limit=context.limits.max_output_chars,
+    )
+    return ToolResult.failed("command timed out", output, metadata={"timed_out": True})
+
+
+def _stop_process(process: subprocess.Popen[str]) -> tuple[str, str]:
+    """Terminate a command and its children, then collect final captured output."""
+
+    if process.poll() is None:
+        _signal_process_group(process, signal.SIGTERM)
+    try:
+        return process.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        _signal_process_group(process, signal.SIGKILL)
+        return process.communicate()
+
+
+def _signal_process_group(process: subprocess.Popen[str], signal_number: int) -> None:
+    """Stop an active command without failing when it exits between checks."""
+
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal_number)
+        elif signal_number == signal.SIGKILL:
+            process.kill()
+        else:
+            process.terminate()
+    except ProcessLookupError:
+        return
 
 
 def _command_argument(arguments: Mapping[str, object]) -> list[str]:
@@ -91,8 +148,3 @@ def _command_output(*, stdout: str, stderr: str, status: str, limit: int) -> str
         sections.extend(("stderr:", stderr))
     return truncate_text("\n".join(sections), limit)
 
-
-def _as_text(value: str | bytes | None) -> str:
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return value or ""

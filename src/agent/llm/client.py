@@ -104,7 +104,9 @@ class ResponsesClient:
         """Start a task or append tool observations to the local transcript."""
 
         if task is not None:
-            return [{"role": "user", "content": task}]
+            # A non-empty history means a user is continuing the same local
+            # conversation after an earlier Agent turn has finished.
+            return [*self._history, {"role": "user", "content": task}]
         if not self._history:
             raise LLMRequestError("follow-up model request has no prior task context")
         return [
@@ -179,14 +181,36 @@ def _parse_response(response: object) -> ModelResponse:
             continue
         tool_calls.append(_parse_tool_call(item))
 
-    text_value = _field(response, "output_text", "")
-    text = str(text_value) if text_value else None
+    text = _response_text(response)
     return ModelResponse(
         response_id=response_id,
         text=text,
         tool_calls=tuple(tool_calls),
         usage=_parse_usage(_field(response, "usage")),
     )
+
+
+def _response_text(response: object) -> str | None:
+    """Read SDK convenience text or standard message content as a fallback."""
+
+    text_value = _field(response, "output_text", "")
+    if text_value:
+        return str(text_value)
+
+    fragments: list[str] = []
+    for item in _output_items(response):
+        if _field(item, "type") != "message":
+            continue
+        content = _field(item, "content", ())
+        if not isinstance(content, Sequence) or isinstance(content, str):
+            continue
+        for part in content:
+            if _field(part, "type") != "output_text":
+                continue
+            value = _field(part, "text")
+            if value:
+                fragments.append(str(value))
+    return "".join(fragments) or None
 
 
 def _parse_usage(raw_usage: object | None) -> Usage | None:

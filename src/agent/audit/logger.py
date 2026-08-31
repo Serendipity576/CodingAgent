@@ -17,12 +17,28 @@ from agent.tools.base import ToolResult
 class AuditLogger:
     """Write minimal, structured events for one task to ``.agent/logs``."""
 
-    def __init__(self, path: Path, task_id: str) -> None:
+    def __init__(
+        self,
+        path: Path,
+        task_id: str,
+        *,
+        conversation_id: str | None = None,
+        turn_id: int | None = None,
+    ) -> None:
         self.path = path
         self.task_id = task_id
+        self.conversation_id = conversation_id
+        self.turn_id = turn_id
 
     @classmethod
-    def create(cls, workspace: Path, *, task_id: str | None = None) -> "AuditLogger | None":
+    def create(
+        cls,
+        workspace: Path,
+        *,
+        task_id: str | None = None,
+        conversation_id: str | None = None,
+        turn_id: int | None = None,
+    ) -> "AuditLogger | None":
         """Create a task log when the workspace permits it, else stay nonfatal."""
 
         identifier = task_id or uuid4().hex
@@ -32,7 +48,12 @@ class AuditLogger:
             path.touch(exist_ok=False)
         except OSError:
             return None
-        return cls(path=path, task_id=identifier)
+        return cls(
+            path=path,
+            task_id=identifier,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+        )
 
     def task_started(self, task: str, git_baseline: GitStatusSnapshot) -> None:
         """Record initial task and baseline state before any tool is executed."""
@@ -91,6 +112,10 @@ class AuditLogger:
             "event": event,
             **details,
         }
+        if self.conversation_id is not None:
+            payload["conversation_id"] = self.conversation_id
+        if self.turn_id is not None:
+            payload["turn_id"] = self.turn_id
         try:
             with self.path.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(payload, ensure_ascii=False, default=str))

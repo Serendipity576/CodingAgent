@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Coding Agent</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <main>
+      <aside>
+        <h1>Coding Agent</h1>
+        <p id="workspace">正在加载 workspace…</p>
+        <button id="new-conversation" type="button">新建会话</button>
+        <h2>会话</h2>
+        <div id="conversations" class="conversation-list"></div>
+      </aside>
+      <section class="chat-panel">
+        <header>
+          <strong id="session-title">尚未创建会话</strong>
+          <button id="cancel" type="button" disabled>取消当前任务</button>
+        </header>
+        <div id="timeline" class="timeline" aria-live="polite"></div>
+        <form id="message-form">
+          <textarea id="message" rows="3" placeholder="输入任务或继续追问" disabled></textarea>
+          <button id="send" type="submit" disabled>发送</button>
+        </form>
+      </section>
+      <aside class="status-panel">
+        <h2>状态</h2>
+        <pre id="status">等待会话</pre>
+      </aside>
+    </main>
+    <dialog id="approval-dialog">
+      <h2>高风险操作确认</h2>
+      <pre id="approval-details"></pre>
+      <div class="dialog-actions">
+        <button id="deny" type="button">拒绝</button>
+        <button id="approve" type="button">批准执行</button>
+      </div>
+    </dialog>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

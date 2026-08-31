@@ -102,6 +102,31 @@ class ResponsesClientTests(unittest.TestCase):
         self.assertNotIn("parallel_tool_calls", request)
         self.assertNotIn("previous_response_id", request)
 
+    def test_message_output_is_used_when_a_compatible_response_has_no_output_text_property(self) -> None:
+        recorder = RecordingResponses(
+            {
+                "id": "response-1",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type": "output_text", "text": "Message fallback works."}
+                        ],
+                    }
+                ],
+            }
+        )
+        client = _recording_client(ResponsesClient, recorder)
+
+        response = client.respond(
+            instructions="Complete the task.",
+            task="Inspect the project.",
+            tools=(),
+            tool_outputs=(),
+        )
+
+        self.assertEqual(response.text, "Message fallback works.")
+
     def test_deepseek_adapter_replays_local_history_without_openai_options(self) -> None:
         first_response = SimpleNamespace(
             id="response-1",
@@ -163,6 +188,49 @@ class ResponsesClientTests(unittest.TestCase):
                     "call_id": "call-1",
                     "output": '{"ok": true}',
                 },
+            ],
+        )
+
+    def test_follow_up_user_message_appends_to_the_same_local_history(self) -> None:
+        recorder = RecordingResponses(
+            SimpleNamespace(
+                id="response-1",
+                output_text="First answer.",
+                output=[
+                    SimpleNamespace(
+                        type="message",
+                        role="assistant",
+                        content=[{"type": "output_text", "text": "First answer."}],
+                    )
+                ],
+            )
+        )
+        client = _recording_client(ResponsesClient, recorder)
+
+        client.respond(
+            instructions="Answer clearly.",
+            task="First question.",
+            tools=(),
+            tool_outputs=(),
+        )
+        recorder.response = SimpleNamespace(id="response-2", output_text="Second answer.", output=[])
+        client.respond(
+            instructions="Answer clearly.",
+            task="Follow-up question.",
+            tools=(),
+            tool_outputs=(),
+        )
+
+        self.assertEqual(
+            recorder.requests[1]["input"],
+            [
+                {"role": "user", "content": "First question."},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "First answer."}],
+                },
+                {"role": "user", "content": "Follow-up question."},
             ],
         )
 

@@ -4,6 +4,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 import sys
 import tempfile
+from threading import Event
 import unittest
 
 from agent.agent import CodingAgent, TaskStatus
@@ -62,6 +63,24 @@ class RuntimeBoundaryTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertLessEqual(len(result.output), 60)
         self.assertIn("truncated", result.output)
+
+    def test_cancelled_command_returns_a_recoverable_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            cancelled = Event()
+            cancelled.set()
+            result = RunCommandTool().execute(
+                {"command": [sys.executable, "-c", "import time; time.sleep(5)"]},
+                ToolContext(
+                    workspace=workspace.resolve(),
+                    limits=RuntimeLimits(command_timeout_seconds=10),
+                    cancelled=cancelled,
+                ),
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "command cancelled")
+        self.assertTrue(result.metadata["cancelled"])
 
     def test_invalid_tool_arguments_are_denied_before_execution(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

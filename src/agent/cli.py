@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import json
 from collections.abc import Sequence
+import sys
 
 from agent import __version__
 from agent.agent import CodingAgent
 from agent.audit import AuditLogger
 from agent.change_tracker import GitStatusSnapshot
+from agent.chat import run_chat
 from agent.config import ConfigurationError, load_settings
 from agent.llm.client import LLMConfigurationError, build_llm_client
 from agent.security.approval import ConsoleApproval
@@ -64,6 +66,27 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TEXT",
         help="Coding task for the agent to complete.",
     )
+    action.add_argument(
+        "--chat",
+        action="store_true",
+        help="Start an interactive multi-turn terminal conversation.",
+    )
+    action.add_argument(
+        "--serve",
+        action="store_true",
+        help="Start the local multi-turn Web interface.",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Loopback host for --serve (default: 127.0.0.1).",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8765,
+        help="Local port for --serve (default: 8765).",
+    )
     parser.add_argument("--version", action="version", version=__version__)
     return parser
 
@@ -72,11 +95,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run configuration inspection or one bounded coding task."""
 
     parser = build_parser()
-    arguments = parser.parse_args(argv)
+    raw_arguments = list(sys.argv[1:] if argv is None else argv)
+    # Keep the older flag form while offering readable ``chat`` and ``serve``
+    # commands without exposing any LLM configuration through the CLI.
+    if raw_arguments[:1] == ["chat"]:
+        raw_arguments[0] = "--chat"
+    elif raw_arguments[:1] == ["serve"]:
+        raw_arguments[0] = "--serve"
+    arguments = parser.parse_args(raw_arguments)
 
     # Require an explicit action so opening the CLI never starts a model request
     # or a local command by surprise.
-    if not arguments.print_config and not arguments.task:
+    if not arguments.print_config and not arguments.task and not arguments.chat and not arguments.serve:
         parser.print_help()
         return 0
 
@@ -95,6 +125,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.print_config:
         # Use the redacted representation instead of serializing Settings directly.
         print(json.dumps(settings.public_dict(), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+
+    if arguments.chat:
+        try:
+            return run_chat(settings, settings.workspace)
+        except (LLMConfigurationError, ValueError) as error:
+            parser.error(str(error))
+
+    if arguments.serve:
+        try:
+            # Fail before the server starts when the local provider settings
+            # are incomplete or invalid. Sessions create their own client later.
+            build_llm_client(settings)
+            from agent.web import run_server
+
+            run_server(settings, settings.workspace, host=arguments.host, port=arguments.port)
+        except (LLMConfigurationError, ValueError) as error:
+            parser.error(str(error))
         return 0
 
     try:

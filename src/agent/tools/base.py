@@ -21,6 +21,14 @@ class ToolContext:
 
     workspace: Path
     limits: RuntimeLimits
+    cancelled: "CancellationCheck | None" = None
+
+
+class CancellationCheck(Protocol):
+    """Expose a cooperative cancellation signal to long-running tools."""
+
+    def is_set(self) -> bool:
+        """Return whether the active Agent turn was cancelled."""
 
 
 @dataclass(frozen=True, slots=True)

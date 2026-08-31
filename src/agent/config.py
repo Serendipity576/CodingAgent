@@ -17,6 +17,8 @@ DEFAULT_COMMAND_TIMEOUT_SECONDS = 60
 DEFAULT_MAX_OUTPUT_CHARS = 20_000
 DEFAULT_MAX_TASK_SECONDS = 900
 DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES = 2
+DEFAULT_MAX_CONVERSATION_TURNS = 50
+DEFAULT_MAX_HISTORY_ITEMS = 300
 SUPPORTED_LLM_PROVIDERS = frozenset({"openai", "deepseek", "responses"})
 LOCAL_CONNECTION_FIELDS = frozenset(
     {
@@ -42,6 +44,8 @@ class RuntimeLimits:
     max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS
     max_task_seconds: int = DEFAULT_MAX_TASK_SECONDS
     max_consecutive_tool_failures: int = DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES
+    max_conversation_turns: int = DEFAULT_MAX_CONVERSATION_TURNS
+    max_history_items: int = DEFAULT_MAX_HISTORY_ITEMS
 
     def __post_init__(self) -> None:
         for field_name, value in (
@@ -50,6 +54,8 @@ class RuntimeLimits:
             ("max_output_chars", self.max_output_chars),
             ("max_task_seconds", self.max_task_seconds),
             ("max_consecutive_tool_failures", self.max_consecutive_tool_failures),
+            ("max_conversation_turns", self.max_conversation_turns),
+            ("max_history_items", self.max_history_items),
         ):
             if value <= 0:
                 raise ConfigurationError(f"{field_name} must be greater than zero")
@@ -88,6 +94,8 @@ class Settings:
                 "max_output_chars": self.limits.max_output_chars,
                 "max_task_seconds": self.limits.max_task_seconds,
                 "max_consecutive_tool_failures": self.limits.max_consecutive_tool_failures,
+                "max_conversation_turns": self.limits.max_conversation_turns,
+                "max_history_items": self.limits.max_history_items,
             },
         }
 
@@ -104,6 +112,8 @@ def load_settings(
     max_output_chars: int | str | None = None,
     max_task_seconds: int | str | None = None,
     max_consecutive_tool_failures: int | str | None = None,
+    max_conversation_turns: int | str | None = None,
+    max_history_items: int | str | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> Settings:
     """Load settings from explicit arguments, environment variables, and defaults.
@@ -176,6 +186,19 @@ def load_settings(
                 env.get("CODING_AGENT_MAX_CONSECUTIVE_TOOL_FAILURES"),
             ),
             DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES,
+        ),
+        max_conversation_turns=_positive_int(
+            "max_conversation_turns",
+            _first_value(
+                max_conversation_turns,
+                env.get("CODING_AGENT_MAX_CONVERSATION_TURNS"),
+            ),
+            DEFAULT_MAX_CONVERSATION_TURNS,
+        ),
+        max_history_items=_positive_int(
+            "max_history_items",
+            _first_value(max_history_items, env.get("CODING_AGENT_MAX_HISTORY_ITEMS")),
+            DEFAULT_MAX_HISTORY_ITEMS,
         ),
     )
     return Settings(

@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [{ name = "Coding Agent contributors" }]
-dependencies = ["openai>=1.66.0"]
+dependencies = ["fastapi>=0.115.0", "openai>=1.66.0", "uvicorn>=0.30.0"]
 
 [project.scripts]
 coding-agent = "agent.cli:main"

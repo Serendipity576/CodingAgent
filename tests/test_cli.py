@@ -88,3 +88,10 @@ class CliTests(unittest.TestCase):
             with redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     build_parser().parse_args([option, "value"])
+
+    def test_chat_and_serve_commands_are_available_without_llm_cli_options(self) -> None:
+        for command in ("chat", "serve"):
+            with redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as result:
+                    main([command, "--help"])
+            self.assertEqual(result.exception.code, 0)
