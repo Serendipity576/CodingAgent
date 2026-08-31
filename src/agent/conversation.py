@@ -1,9 +1,9 @@
-"""In-memory multi-turn conversations built from the bounded Agent runtime."""
+"""Durable multi-turn conversations built from the bounded Agent runtime."""
 
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -16,6 +16,7 @@ from agent.agent import CodingAgent, TaskResult
 from agent.audit import AuditLogger
 from agent.change_tracker import GitStatusSnapshot
 from agent.config import Settings
+from agent.conversation_store import ConversationStore, StoredConversation
 from agent.llm.client import LLMClient, build_llm_client
 from agent.security.approval import ApprovalHandler
 from agent.tools import build_default_registry
@@ -23,10 +24,11 @@ from agent.tools.registry import ToolRegistry
 
 
 class ConversationState(str, Enum):
-    """Visible lifecycle states for one conversation session."""
+    """Visible lifecycle states for one persisted conversation session."""
 
     IDLE = "idle"
     RUNNING = "running"
+    INTERRUPTED = "interrupted"
     CLOSED = "closed"
     LIMIT_REACHED = "limit_reached"
 
@@ -62,7 +64,7 @@ class ApprovalFactory(Protocol):
 
 
 class ConversationSession:
-    """Own one LLM history, event stream, message queue, and turn worker."""
+    """Own one local transcript, event journal, message queue, and turn worker."""
 
     def __init__(
         self,
@@ -70,17 +72,20 @@ class ConversationSession:
         settings: Settings,
         workspace: Path,
         execution_lock: Lock,
+        store: ConversationStore,
         approval_factory: ApprovalFactory | None = None,
         max_turns: int | None = None,
         max_history_items: int | None = None,
+        restored: StoredConversation | None = None,
     ) -> None:
-        self.id = uuid4().hex
         self.workspace = workspace.resolve()
         self._settings = settings
         self._execution_lock = execution_lock
+        self._store = store
         self._max_turns = max_turns or settings.limits.max_conversation_turns
         self._max_history_items = max_history_items or settings.limits.max_history_items
-        self._llm: LLMClient = build_llm_client(settings)
+        self.id = restored.conversation_id if restored else uuid4().hex
+        self._created_at = restored.created_at if restored else time()
         self._events: list[ConversationEvent] = []
         self._events_ready = Condition(RLock())
         self._queue: deque[str] = deque()
@@ -90,12 +95,21 @@ class ConversationSession:
         self._state = ConversationState.IDLE
         self._turn_count = 0
         self._latest_result: TaskResult | None = None
+        self._latest_result_data: dict[str, object] | None = None
+        self._deleted = False
+        self._llm: LLMClient = build_llm_client(settings)
         # A session captures one baseline, so Agent edits in an earlier turn do
         # not become falsely labelled as user changes in a later turn.
         self._git_baseline = GitStatusSnapshot.capture(self.workspace)
         approval = approval_factory(self.publish) if approval_factory else None
+        self._approval = approval
         self._tools: ToolRegistry = build_default_registry(self.workspace, approval=approval)
-        self.publish("conversation_created", {"workspace": str(self.workspace)})
+
+        if restored is None:
+            self._persist()
+            self.publish("conversation_created", {"workspace": str(self.workspace)})
+        else:
+            self._restore(restored)
 
     @property
     def state(self) -> ConversationState:
@@ -106,7 +120,7 @@ class ConversationSession:
 
     @property
     def latest_result(self) -> TaskResult | None:
-        """Return the result from the last finished user turn."""
+        """Return the last in-process task result, if one exists."""
 
         with self._lock:
             return self._latest_result
@@ -118,7 +132,10 @@ class ConversationSession:
         if not text:
             raise ValueError("message must not be empty")
         with self._lock:
-            if self._state in {ConversationState.CLOSED, ConversationState.LIMIT_REACHED}:
+            if self._deleted or self._state in {
+                ConversationState.CLOSED,
+                ConversationState.LIMIT_REACHED,
+            }:
                 return False
             if self._history_item_count() >= self._max_history_items:
                 self._state = ConversationState.LIMIT_REACHED
@@ -149,22 +166,49 @@ class ConversationSession:
                 return False
             self._cancel_event.set()
             self._queue.clear()
+        self._deny_pending_approvals()
         self.publish("turn_cancel_requested", {})
         return True
 
     def close(self) -> None:
-        """Reject future messages and request cancellation of active work."""
+        """Reject future messages while retaining the transcript for later review."""
 
         with self._lock:
+            if self._deleted:
+                return
             self._state = ConversationState.CLOSED
             self._queue.clear()
             self._cancel_event.set()
+        self._deny_pending_approvals()
         self.publish("conversation_closed", {})
 
-    def publish(self, event: str, details: Mapping[str, object]) -> None:
-        """Append a safe event and wake SSE or terminal observers."""
+    def delete(self) -> None:
+        """Stop work and permanently erase this session's local stored state."""
 
-        with self._events_ready:
+        with self._lock:
+            if self._deleted:
+                return
+            self._deleted = True
+            self._state = ConversationState.CLOSED
+            self._queue.clear()
+            self._cancel_event.set()
+            # Hold the same lock used by publish() until the database row is
+            # gone, so a finishing worker cannot recreate a deleted session.
+            self._store.delete_conversation(self.id)
+        self._deny_pending_approvals()
+
+    def resolve_approval(self, approval_id: str, approved: bool) -> bool:
+        """Resolve one active Web approval without exposing its handler externally."""
+
+        resolver = getattr(self._approval, "resolve", None)
+        return bool(resolver(approval_id, approved)) if callable(resolver) else False
+
+    def publish(self, event: str, details: Mapping[str, object]) -> None:
+        """Append a safe event, durably journal it, and wake active observers."""
+
+        with self._lock, self._events_ready:
+            if self._deleted:
+                return
             item = ConversationEvent(
                 sequence=len(self._events) + 1,
                 event=event,
@@ -173,6 +217,16 @@ class ConversationSession:
             )
             self._events.append(item)
             self._events_ready.notify_all()
+            # Persist state after every visible transition. This includes model
+            # transcript changes made immediately before runtime event emission.
+            self._persist()
+            self._store.append_event(
+                self.id,
+                sequence=item.sequence,
+                event=item.event,
+                timestamp=item.timestamp,
+                details=item.details,
+            )
 
     def events_after(self, sequence: int, *, timeout_seconds: float = 15) -> list[ConversationEvent]:
         """Wait for events newer than ``sequence`` for event-stream clients."""
@@ -184,11 +238,17 @@ class ConversationSession:
                 matching = [item for item in self._events if item.sequence > sequence]
             return matching
 
+    def latest_event_sequence(self) -> int:
+        """Return the current journal position for terminal incremental rendering."""
+
+        with self._events_ready:
+            return len(self._events)
+
     def snapshot(self) -> dict[str, object]:
-        """Return a compact session view without exposing local LLM history."""
+        """Return a compact session view without exposing the local LLM transcript."""
 
         with self._lock:
-            result = self._latest_result
+            result = self._latest_result_data or _result_data(self._latest_result)
             return {
                 "conversation_id": self.id,
                 "workspace": str(self.workspace),
@@ -198,19 +258,54 @@ class ConversationSession:
                 "queued_messages": len(self._queue),
                 "history_items": self._history_item_count(),
                 "max_history_items": self._max_history_items,
-                "latest_status": result.status.value if result else None,
-                "latest_message": result.message if result else None,
-                "summary": result.summary.as_dict() if result and result.summary else None,
+                "latest_status": result.get("status") if result else None,
+                "latest_message": result.get("message") if result else None,
+                "summary": result.get("summary") if result else None,
             }
+
+    def _restore(self, restored: StoredConversation) -> None:
+        """Rebuild a session from local storage without restarting active work."""
+
+        with self._events_ready:
+            self._events = [
+                ConversationEvent(
+                    sequence=item.sequence,
+                    event=item.event,
+                    timestamp=item.timestamp,
+                    details=dict(item.details),
+                )
+                for item in restored.events
+            ]
+        self._turn_count = restored.turn_count
+        self._max_turns = restored.max_turns
+        self._max_history_items = restored.max_history_items
+        self._latest_result_data = dict(restored.latest_result) if restored.latest_result else None
+        self._state = _stored_state(restored.state)
+        _restore_history(self._llm, restored.transcript)
+
+        if self._state is ConversationState.RUNNING:
+            # A process restart cannot prove whether an external command or
+            # request completed. Never automatically replay that active turn.
+            self._state = ConversationState.INTERRUPTED
+            self.publish(
+                "conversation_interrupted",
+                {"reason": "server_restart", "message": "上一轮在服务重启时中断，请确认后继续。"},
+            )
+        else:
+            self._persist()
 
     def _run_queue(self) -> None:
         """Process one workspace's queued turns serially in a daemon worker."""
 
         while True:
             with self._lock:
-                if self._state is ConversationState.CLOSED or not self._queue:
-                    if self._state is not ConversationState.CLOSED:
+                if self._deleted or self._state is ConversationState.CLOSED or not self._queue:
+                    if (
+                        not self._deleted
+                        and self._state not in {ConversationState.CLOSED, ConversationState.IDLE}
+                    ):
                         self._state = ConversationState.IDLE
+                        self._persist()
                     return
                 message = self._queue.popleft()
                 self._state = ConversationState.RUNNING
@@ -238,7 +333,15 @@ class ConversationSession:
                 result = agent.run(message)
 
             with self._lock:
+                if self._deleted:
+                    return
                 self._latest_result = result
+                self._latest_result_data = _result_data(result)
+                # Persist the completed turn as idle before announcing it when
+                # no message remains queued. A restart in this narrow window
+                # must not misclassify finished work as active work.
+                if not self._queue:
+                    self._state = ConversationState.IDLE
             self.publish(
                 "conversation_turn_finished",
                 {
@@ -251,55 +354,167 @@ class ConversationSession:
                 },
             )
 
-    def _history_item_count(self) -> int:
-        """Read only a local adapter's item count; generic fakes report zero."""
+    def _persist(self) -> None:
+        """Save a consistent metadata/transcript snapshot unless deletion won the race."""
 
+        with self._lock:
+            if self._deleted:
+                return
+            self._store.save_conversation(
+                conversation_id=self.id,
+                created_at=self._created_at,
+                state=self._state.value,
+                turn_count=self._turn_count,
+                max_turns=self._max_turns,
+                max_history_items=self._max_history_items,
+                transcript=_export_history(self._llm),
+                latest_result=self._latest_result_data or _result_data(self._latest_result),
+            )
+
+    def _history_item_count(self) -> int:
+        """Read a local adapter's transcript size; generic test doubles report zero."""
+
+        exported = _export_history(self._llm)
+        if exported:
+            return len(exported)
         history = getattr(self._llm, "_history", ())
         return len(history) if isinstance(history, list) else 0
 
+    def _deny_pending_approvals(self) -> None:
+        """Release a browser approval wait when cancellation, close, or delete occurs."""
+
+        deny_all = getattr(self._approval, "deny_all", None)
+        if callable(deny_all):
+            deny_all()
+
 
 class ConversationManager:
-    """Create and retain in-memory sessions for one workspace-bound process."""
+    """Load, create, resume, and delete workspace-scoped durable sessions."""
 
     def __init__(
         self,
         settings: Settings,
         workspace: Path,
         *,
+        approval_factory: ApprovalFactory | None = None,
         max_turns: int | None = None,
         max_history_items: int | None = None,
     ) -> None:
         self._settings = settings
         self._workspace = workspace.resolve()
+        self._approval_factory = approval_factory
         self._max_turns = max_turns
         self._max_history_items = max_history_items
         self._execution_lock = Lock()
+        self._store = ConversationStore(self._workspace)
         self._sessions: dict[str, ConversationSession] = {}
         self._lock = RLock()
+        for stored in self._store.load_conversations():
+            session = self._build_session(restored=stored)
+            self._sessions[session.id] = session
 
     def create(self, approval_factory: ApprovalFactory | None = None) -> ConversationSession:
-        """Create a session with an independent local LLM transcript."""
+        """Create a new transcript without sharing context with existing sessions."""
 
-        session = ConversationSession(
-            settings=self._settings,
-            workspace=self._workspace,
-            execution_lock=self._execution_lock,
-            approval_factory=approval_factory,
-            max_turns=self._max_turns,
-            max_history_items=self._max_history_items,
-        )
+        session = self._build_session(approval_factory=approval_factory)
         with self._lock:
             self._sessions[session.id] = session
         return session
 
     def get(self, conversation_id: str) -> ConversationSession | None:
-        """Return one known session without creating implicit conversations."""
+        """Return one known session without creating an implicit conversation."""
 
         with self._lock:
             return self._sessions.get(conversation_id)
 
+    def resolve(self, identifier: str) -> ConversationSession | None:
+        """Resolve a full id or one unambiguous prefix for terminal recovery commands."""
+
+        with self._lock:
+            if identifier in self._sessions:
+                return self._sessions[identifier]
+            matches = [item for item in self._sessions.values() if item.id.startswith(identifier)]
+            return matches[0] if len(matches) == 1 else None
+
+    def delete(self, conversation_id: str) -> bool:
+        """Permanently delete one session's transcript, events, and metadata."""
+
+        with self._lock:
+            session = self._sessions.pop(conversation_id, None)
+        if session is None:
+            return False
+        session.delete()
+        return True
+
     def snapshots(self) -> list[dict[str, object]]:
-        """List conversation metadata in creation order for a UI sidebar."""
+        """List current and restored conversation metadata in recent-first order."""
 
         with self._lock:
             return [session.snapshot() for session in self._sessions.values()]
+
+    def _build_session(
+        self,
+        *,
+        approval_factory: ApprovalFactory | None = None,
+        restored: StoredConversation | None = None,
+    ) -> ConversationSession:
+        """Construct a session with shared workspace serialization and durable storage."""
+
+        return ConversationSession(
+            settings=self._settings,
+            workspace=self._workspace,
+            execution_lock=self._execution_lock,
+            store=self._store,
+            approval_factory=approval_factory or self._approval_factory,
+            max_turns=self._max_turns,
+            max_history_items=self._max_history_items,
+            restored=restored,
+        )
+
+
+def _stored_state(value: str) -> ConversationState:
+    """Convert a database state string into the current explicit lifecycle enum."""
+
+    try:
+        return ConversationState(value)
+    except ValueError as error:
+        raise ValueError(f"stored conversation state is invalid: {value}") from error
+
+
+def _export_history(llm: object) -> tuple[dict[str, object], ...]:
+    """Copy optional transcript support without forcing lightweight test doubles."""
+
+    exporter = getattr(llm, "export_history", None)
+    if not callable(exporter):
+        return ()
+    exported = exporter()
+    if not isinstance(exported, Sequence) or isinstance(exported, str):
+        raise ValueError("LLM transcript export must return a sequence")
+    if not all(isinstance(item, Mapping) for item in exported):
+        raise ValueError("LLM transcript items must be mappings")
+    return tuple(dict(item) for item in exported)
+
+
+def _restore_history(llm: object, transcript: Sequence[Mapping[str, object]]) -> None:
+    """Restore local transcript state when the configured client supports it."""
+
+    if not transcript:
+        return
+    restorer = getattr(llm, "restore_history", None)
+    if not callable(restorer):
+        raise ValueError("configured LLM client cannot restore persisted conversation history")
+    restorer(transcript)
+
+
+def _result_data(result: TaskResult | None) -> dict[str, object] | None:
+    """Persist only snapshot fields the UI can safely display after restart."""
+
+    if result is None:
+        return None
+    return {
+        "status": result.status.value,
+        "message": result.message,
+        "steps": result.steps,
+        "summary": result.summary.as_dict() if result.summary else None,
+        "audit_log": str(result.audit_log) if result.audit_log else None,
+    }

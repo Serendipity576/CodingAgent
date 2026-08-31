@@ -13,6 +13,7 @@ export function eventLabel(event: string): string {
     assistant_message: "Agent 回复",
     agent_finished: "Agent 已完成",
     conversation_turn_finished: "本轮任务已结束",
+    conversation_interrupted: "服务重启后会话已中断",
     approval_required: "等待高风险操作确认",
     approval_resolved: "高风险操作已处理",
     conversation_limit_reached: "会话已达到上限",
@@ -36,6 +37,7 @@ export function stateLabel(state: ConversationState): string {
   const labels: Record<ConversationState, string> = {
     idle: "等待输入",
     running: "正在执行",
+    interrupted: "已中断，可继续",
     closed: "已关闭",
     limit_reached: "已达上限",
   };

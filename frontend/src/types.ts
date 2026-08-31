@@ -32,7 +32,7 @@ export interface ConversationSnapshot {
   summary: TaskSummary | null;
 }
 
-export type ConversationState = "idle" | "running" | "closed" | "limit_reached";
+export type ConversationState = "idle" | "running" | "interrupted" | "closed" | "limit_reached";
 
 export interface ConversationEvent {
   sequence: number;

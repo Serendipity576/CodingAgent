@@ -52,7 +52,9 @@ Start a terminal conversation to send several user messages through one locally 
 coding-agent chat --workspace /path/to/project
 ```
 
-Terminal commands are `/help`, `/new`, `/status`, `/cancel`, and `/quit`. `/new` creates a fresh local transcript; conversation history is not persisted across a process restart.
+Terminal commands are `/help`, `/new`, `/sessions`, `/open <id>`, `/status`, `/cancel`, and `/quit`. `/new` creates a fresh local transcript; `/sessions` lists the workspace's saved sessions; `/open` resumes one using an unambiguous id prefix.
+
+Each workspace stores its sessions in `.agent/conversations/sessions.sqlite3`. The database contains the client-owned model transcript, session metadata, and browser-safe event journal, but never the API key. On POSIX systems it is created with owner-only permissions and Agent tools are denied access to `.agent`. It is local runtime data, is ignored by Git, and should be backed up or deleted only deliberately. A turn that was active during a process restart is marked **interrupted**; the Agent never reruns its model or tool calls automatically.
 
 Start the local Web interface:
 
@@ -60,7 +62,7 @@ Start the local Web interface:
 coding-agent serve --workspace /path/to/project
 ```
 
-Open `http://127.0.0.1:8765`. This is a React workbench with a session sidebar, typed event timeline, collapsible tool cards, execution summary, cancellation controls, and high-risk approval dialog. It communicates with the local server through REST and server-sent events; it never receives the API key or provider reasoning data. The server rejects non-loopback hosts.
+Open `http://127.0.0.1:8765`. This is a React workbench with a session sidebar, typed event timeline, collapsible tool cards, execution summary, cancellation controls, high-risk approval dialog, and explicit local-session deletion. It communicates with the local server through REST and server-sent events; it never receives the API key or provider reasoning data. The server rejects non-loopback hosts.
 
 ### Web frontend development
 
@@ -82,7 +84,7 @@ For hot-reload development, start `coding-agent serve` in one terminal and run
 `npm run dev` in another; then open `http://127.0.0.1:5173/static/`. Vite proxies
 only `/api` to the loopback FastAPI service.
 
-One workspace executes one Agent turn at a time, even across several browser conversations. Sessions have turn and local-history-item limits; when a limit is reached, start a new conversation rather than silently discarding provider continuation data.
+One workspace executes one Agent turn at a time, even across several browser conversations. Sessions have turn and local-history-item limits; when a limit is reached, start a new conversation rather than silently discarding provider continuation data. Completed sessions can be resumed after restart until they are explicitly deleted.
 
 ## Safety boundary
 
@@ -92,7 +94,7 @@ Every tool request receives one deterministic decision:
 - `REQUIRE_APPROVAL`: deletion, dependency management, network-capable commands, destructive Git operations, and unknown executables require an interactive `y`/`yes` confirmation;
 - `DENY`: workspace escape, sensitive files, `sudo`, shutdown/reboot, formatting, and similar critical actions never execute.
 
-The path guard resolves real paths before checking containment, so `../`, absolute escape, and symlink escape are rejected. Common credential paths such as `.env`, private keys, `credentials`, and `secrets` are also denied. The policy is rule-based rather than a complete static analyzer, and it is not container isolation.
+The path guard resolves real paths before checking containment, so `../`, absolute escape, and symlink escape are rejected. Common credential paths such as `.env`, private keys, `credentials`, `secrets`, and the Agent's own `.agent` state are also denied. The policy is rule-based rather than a complete static analyzer, and it is not container isolation.
 
 In Web mode, `REQUIRE_APPROVAL` pauses the worker and shows one browser prompt containing the exact tool, safe argument summary, risk, and reason. Approval applies only to that one call; rejection, timeout, cancellation, and an unknown approval id deny it. Cancelling a turn also stops an active local command and its POSIX child process group where supported.
 

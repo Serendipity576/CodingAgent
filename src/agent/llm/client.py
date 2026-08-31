@@ -37,6 +37,19 @@ class LLMClient(Protocol):
         """Request the next model turn from locally supplied context."""
 
 
+class TranscriptClient(Protocol):
+    """Optional local-history capability used only by conversation persistence."""
+
+    def export_history(self) -> list[dict[str, object]]:
+        """Return a JSON-safe copy of the client-owned request transcript."""
+
+    def restore_history(self, history: Sequence[Mapping[str, object]]) -> None:
+        """Replace the local request transcript recovered from durable storage."""
+
+    def record_tool_outputs(self, tool_outputs: Sequence[ToolOutput]) -> None:
+        """Persist tool observations before the next model request begins."""
+
+
 class ResponsesClient:
     """Call a Responses-compatible endpoint using only shared request fields."""
 
@@ -96,6 +109,26 @@ class ResponsesClient:
         self._history = [*input_items, *_response_input_items(response)]
         return model_response
 
+    def export_history(self) -> list[dict[str, object]]:
+        """Return a deep JSON copy without exposing mutable client internals."""
+
+        return _json_copy(self._history)
+
+    def restore_history(self, history: Sequence[Mapping[str, object]]) -> None:
+        """Restore a validated local transcript after an application restart."""
+
+        copied = _json_copy([dict(item) for item in history])
+        if not all(isinstance(item, dict) for item in copied):
+            raise LLMRequestError("stored model transcript must contain JSON objects")
+        self._history = copied
+
+    def record_tool_outputs(self, tool_outputs: Sequence[ToolOutput]) -> None:
+        """Append completed tool observations before a crash can lose their context."""
+
+        additions = _tool_output_items(tool_outputs)
+        if additions and self._history[-len(additions):] != additions:
+            self._history.extend(additions)
+
     def _build_input(
         self,
         task: str | None,
@@ -109,17 +142,13 @@ class ResponsesClient:
             return [*self._history, {"role": "user", "content": task}]
         if not self._history:
             raise LLMRequestError("follow-up model request has no prior task context")
-        return [
-            *self._history,
-            *[
-                {
-                    "type": "function_call_output",
-                    "call_id": tool_output.call_id,
-                    "output": tool_output.output,
-                }
-                for tool_output in tool_outputs
-            ],
-        ]
+        additions = _tool_output_items(tool_outputs)
+        # The Agent records each completed tool result immediately for durable
+        # recovery. Do not append the same observations a second time when the
+        # normal next model call receives them as its argument.
+        if additions and self._history[-len(additions):] == additions:
+            return list(self._history)
+        return [*self._history, *additions]
 
     def _provider_request_options(self) -> dict[str, object]:
         """Return optional parameters supported by this endpoint adapter."""
@@ -251,6 +280,31 @@ def _response_input_items(response: object) -> list[dict[str, object]]:
         if serialized is not None:
             items.append(serialized)
     return items
+
+
+def _tool_output_items(tool_outputs: Sequence[ToolOutput]) -> list[dict[str, object]]:
+    """Encode function observations once for local replay and durable storage."""
+
+    return [
+        {
+            "type": "function_call_output",
+            "call_id": tool_output.call_id,
+            "output": tool_output.output,
+        }
+        for tool_output in tool_outputs
+    ]
+
+
+def _json_copy(value: object) -> list[dict[str, object]]:
+    """Copy JSON-compatible Response items without retaining caller references."""
+
+    try:
+        copied = json.loads(json.dumps(value, ensure_ascii=False))
+    except (TypeError, ValueError) as error:
+        raise LLMRequestError("model transcript is not JSON serializable") from error
+    if not isinstance(copied, list):
+        raise LLMRequestError("model transcript must be a JSON list")
+    return copied
 
 
 def _output_items(response: object) -> Sequence[object]:

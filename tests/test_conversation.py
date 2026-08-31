@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from pathlib import Path
 import tempfile
 from time import monotonic
@@ -10,6 +11,7 @@ from unittest.mock import patch
 
 from agent.config import RuntimeLimits, Settings
 from agent.conversation import ConversationManager, ConversationState
+from agent.conversation_store import ConversationStore
 from agent.llm.models import ModelResponse, ToolOutput
 
 
@@ -33,6 +35,50 @@ class RecordingLLM:
             text=f"answer-{len(self.requests)}",
             tool_calls=(),
         )
+
+
+class DurableRecordingLLM(RecordingLLM):
+    """Test client whose locally owned transcript can survive a manager restart."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._history: list[dict[str, object]] = []
+        self.restored_history: list[dict[str, object]] | None = None
+
+    def respond(
+        self,
+        *,
+        instructions: str,
+        task: str | None,
+        tools: Sequence[Mapping[str, object]],
+        tool_outputs: Sequence[ToolOutput],
+    ) -> ModelResponse:
+        """Append enough safe model state to verify continuation after recovery."""
+
+        self.requests.append({"instructions": instructions, "task": task})
+        if task is not None:
+            self._history.append({"role": "user", "content": task})
+        response_id = f"response-{len(self.requests)}"
+        text = f"answer-{len(self.requests)}"
+        self._history.append(
+            {
+                "type": "message",
+                "id": response_id,
+                "content": [{"type": "output_text", "text": text}],
+            }
+        )
+        return ModelResponse(response_id=response_id, text=text, tool_calls=())
+
+    def export_history(self) -> list[dict[str, object]]:
+        """Return a copy so assertions cannot mutate the fake client state."""
+
+        return deepcopy(self._history)
+
+    def restore_history(self, history: Sequence[Mapping[str, object]]) -> None:
+        """Record and restore the exact persisted transcript for assertions."""
+
+        self._history = [dict(item) for item in history]
+        self.restored_history = deepcopy(self._history)
 
 
 class ConversationTests(unittest.TestCase):
@@ -64,6 +110,78 @@ class ConversationTests(unittest.TestCase):
                 self.assertFalse(session.submit("Rejected message."))
 
         self.assertEqual(session.state, ConversationState.LIMIT_REACHED)
+
+    def test_session_restores_local_history_and_can_be_deleted(self) -> None:
+        """Persist one completed turn, resume it in a new manager, then erase it."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            first_llm = DurableRecordingLLM()
+            restored_llm = DurableRecordingLLM()
+            with patch(
+                "agent.conversation.build_llm_client",
+                side_effect=[first_llm, restored_llm],
+            ):
+                manager = ConversationManager(_settings(workspace), workspace)
+                session = manager.create()
+                self.assertTrue(session.submit("First message."))
+                _wait_for_finished_turn(session, 1)
+                conversation_id = session.id
+                saved_history = first_llm.export_history()
+                database = workspace / ".agent" / "conversations" / "sessions.sqlite3"
+
+                restored_manager = ConversationManager(_settings(workspace), workspace)
+                restored = restored_manager.get(conversation_id)
+                self.assertIsNotNone(restored)
+                assert restored is not None
+                self.assertEqual(restored.state, ConversationState.IDLE)
+                self.assertEqual(restored_llm.restored_history, saved_history)
+                self.assertTrue(restored.submit("Follow-up message."))
+                _wait_for_finished_turn(restored, 2)
+                self.assertTrue(restored_manager.delete(conversation_id))
+
+            self.assertTrue(database.exists())
+            self.assertNotIn(b"test-key", database.read_bytes())
+            self.assertEqual(ConversationStore(workspace).load_conversations(), ())
+
+        self.assertEqual([request["task"] for request in first_llm.requests], ["First message."])
+        self.assertEqual([request["task"] for request in restored_llm.requests], ["Follow-up message."])
+
+    def test_running_session_becomes_interrupted_without_replaying_work(self) -> None:
+        """Never rerun a persisted active turn after a process restart."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = ConversationStore(workspace)
+            store.save_conversation(
+                conversation_id="interrupted-session",
+                created_at=1.0,
+                state=ConversationState.RUNNING.value,
+                turn_count=1,
+                max_turns=4,
+                max_history_items=20,
+                transcript=(),
+                latest_result=None,
+            )
+            store.append_event(
+                "interrupted-session",
+                sequence=1,
+                event="conversation_turn_started",
+                timestamp=1.0,
+                details={"turn_id": 1},
+            )
+            llm = DurableRecordingLLM()
+            with patch("agent.conversation.build_llm_client", return_value=llm):
+                manager = ConversationManager(_settings(workspace), workspace)
+                session = manager.get("interrupted-session")
+                self.assertIsNotNone(session)
+                assert session is not None
+                self.assertEqual(session.state, ConversationState.INTERRUPTED)
+                self.assertEqual(llm.requests, [])
+                events = session.events_after(0, timeout_seconds=0)
+                self.assertEqual(events[-1].event, "conversation_interrupted")
+                self.assertTrue(session.submit("Continue after review."))
+                _wait_for_finished_turn(session, 2)
 
 
 def _wait_for_finished_turn(session: object, turn_id: int) -> None:

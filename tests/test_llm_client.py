@@ -234,6 +234,64 @@ class ResponsesClientTests(unittest.TestCase):
             ],
         )
 
+    def test_exported_history_restores_a_tool_result_before_the_next_user_turn(self) -> None:
+        """A restart keeps the model-facing tool observation in local context."""
+
+        first_recorder = RecordingResponses(
+            {
+                "id": "response-1",
+                "output_text": "",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-1",
+                        "name": "read_file",
+                        "arguments": '{"path":"README.md"}',
+                    }
+                ],
+            }
+        )
+        first_client = _recording_client(ResponsesClient, first_recorder)
+        first_client.respond(
+            instructions="Use tools.",
+            task="Inspect the project.",
+            tools=(),
+            tool_outputs=(),
+        )
+        first_client.record_tool_outputs((ToolOutput(call_id="call-1", output="contents"),))
+        persisted_history = first_client.export_history()
+
+        restored_recorder = RecordingResponses(
+            {"id": "response-2", "output_text": "Done.", "output": []}
+        )
+        restored_client = _recording_client(ResponsesClient, restored_recorder)
+        restored_client.restore_history(persisted_history)
+        restored_client.respond(
+            instructions="Use tools.",
+            task="Now summarize it.",
+            tools=(),
+            tool_outputs=(),
+        )
+
+        self.assertEqual(
+            restored_recorder.requests[0]["input"],
+            [
+                {"role": "user", "content": "Inspect the project."},
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "read_file",
+                    "arguments": '{"path":"README.md"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-1",
+                    "output": "contents",
+                },
+                {"role": "user", "content": "Now summarize it."},
+            ],
+        )
+
     def test_explicit_provider_selects_the_matching_internal_adapter(self) -> None:
         self.assertIs(
             _client_class_for_provider("openai"),

@@ -7,6 +7,7 @@ from difflib import unified_diff
 from pathlib import Path
 
 from agent.security.path_guard import PathAccessError, WorkspacePathGuard
+from agent.security.sensitive import SensitiveDataGuard
 from agent.tools.base import ToolContext, ToolError, ToolResult, truncate_text
 
 
@@ -68,7 +69,14 @@ class ListFilesTool:
             raise ToolError("max_depth must be an integer from 0 to 5")
 
         entries: list[str] = []
-        self._walk(target, context.workspace.resolve(), max_depth, 0, entries)
+        self._walk(
+            target,
+            context.workspace.resolve(),
+            max_depth,
+            0,
+            entries,
+            SensitiveDataGuard(),
+        )
         output = "\n".join(entries) if entries else "(empty directory)"
         return ToolResult.succeeded(truncate_text(output, context.limits.max_output_chars))
 
@@ -79,6 +87,7 @@ class ListFilesTool:
         max_depth: int,
         current_depth: int,
         entries: list[str],
+        sensitive_guard: SensitiveDataGuard,
     ) -> None:
         try:
             children = sorted(directory.iterdir(), key=lambda child: child.name.lower())
@@ -87,13 +96,24 @@ class ListFilesTool:
 
         for child in children:
             relative = child.relative_to(workspace).as_posix()
+            if sensitive_guard.reason(Path(relative)):
+                # A directory listing must not reveal protected local state
+                # that the same Agent is prohibited from opening directly.
+                continue
             if child.is_symlink():
                 # Show links for diagnosis but never traverse them during P1.
                 entries.append(f"{relative}@")
             elif child.is_dir():
                 entries.append(f"{relative}/")
                 if current_depth < max_depth:
-                    self._walk(child, workspace, max_depth, current_depth + 1, entries)
+                    self._walk(
+                        child,
+                        workspace,
+                        max_depth,
+                        current_depth + 1,
+                        entries,
+                        sensitive_guard,
+                    )
             else:
                 entries.append(relative)
 

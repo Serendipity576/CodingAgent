@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator
 import json
 from pathlib import Path
 from typing import Annotated
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -31,11 +31,14 @@ class ApprovalBody(BaseModel):
 
 
 def create_app(settings: Settings, workspace: Path) -> FastAPI:
-    """Build a loopback-only Web application with an in-memory session manager."""
+    """Build a loopback-only Web application backed by durable local sessions."""
 
     app = FastAPI(title="Coding Agent", docs_url=None, redoc_url=None)
-    manager = ConversationManager(settings, workspace)
-    approvals: dict[str, WebApproval] = {}
+    manager = ConversationManager(
+        settings,
+        workspace,
+        approval_factory=lambda publish: WebApproval(publish),
+    )
     static_dir = Path(__file__).with_name("static")
     app.state.manager = manager
 
@@ -63,22 +66,12 @@ def create_app(settings: Settings, workspace: Path) -> FastAPI:
 
     @app.post("/api/conversations", status_code=201)
     async def create_conversation() -> dict[str, object]:
-        """Create one local conversation and its browser approval handler."""
-
-        holder: dict[str, WebApproval] = {}
-
-        def approval_factory(
-            publish: Callable[[str, Mapping[str, object]], None],
-        ) -> WebApproval:
-            handler = WebApproval(publish)
-            holder["handler"] = handler
-            return handler
+        """Create one durable local conversation with browser approvals."""
 
         try:
-            session = manager.create(approval_factory)
+            session = manager.create()
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
-        approvals[session.id] = holder["handler"]
         return session.snapshot()
 
     @app.get("/api/conversations/{conversation_id}")
@@ -105,9 +98,6 @@ def create_app(settings: Settings, workspace: Path) -> FastAPI:
         """Cancel current work and deny any approval waiting in that session."""
 
         session = _session_or_404(manager, conversation_id)
-        handler = approvals.get(conversation_id)
-        if handler is not None:
-            handler.deny_all()
         return {"cancelled": session.cancel()}
 
     @app.post("/api/conversations/{conversation_id}/approvals/{approval_id}")
@@ -118,11 +108,18 @@ def create_app(settings: Settings, workspace: Path) -> FastAPI:
     ) -> dict[str, bool]:
         """Resolve exactly one active approval request from the local page."""
 
-        _session_or_404(manager, conversation_id)
-        handler = approvals.get(conversation_id)
-        if handler is None or not handler.resolve(approval_id, body.approved):
+        session = _session_or_404(manager, conversation_id)
+        if not session.resolve_approval(approval_id, body.approved):
             raise HTTPException(status_code=404, detail="approval is not pending")
         return {"accepted": True}
+
+    @app.delete("/api/conversations/{conversation_id}", status_code=204)
+    async def delete_conversation(conversation_id: str) -> Response:
+        """Permanently erase one local transcript and its browser event journal."""
+
+        if not manager.delete(conversation_id):
+            raise HTTPException(status_code=404, detail="conversation not found")
+        return Response(status_code=204)
 
     @app.get("/api/conversations/{conversation_id}/events")
     async def events(conversation_id: str, after: int = 0) -> StreamingResponse:

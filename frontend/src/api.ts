@@ -29,6 +29,8 @@ export const api = {
     request<ConversationSnapshot>(`/api/conversations/${conversationId}`),
   createConversation: () =>
     request<ConversationSnapshot>("/api/conversations", { method: "POST" }),
+  deleteConversation: (conversationId: string) =>
+    request<void>(`/api/conversations/${conversationId}`, { method: "DELETE" }),
   sendMessage: (conversationId: string, text: string) =>
     request<ConversationSnapshot>(`/api/conversations/${conversationId}/messages`, {
       method: "POST",

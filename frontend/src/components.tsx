@@ -17,7 +17,7 @@ import type {
   TaskSummary,
 } from "./types";
 
-type IconName = "add" | "arrow" | "close" | "code" | "history" | "pause" | "send";
+type IconName = "add" | "arrow" | "close" | "code" | "delete" | "history" | "pause" | "send";
 
 interface IconProps {
   name: IconName;
@@ -43,6 +43,7 @@ export function Icon({ name, size = 18 }: IconProps) {
     arrow: <path d="m9 18 6-6-6-6" />,
     close: <path d="m6 6 12 12M18 6 6 18" />,
     code: <path d="m8 9-3 3 3 3m8-6 3 3-3 3M14 5l-4 14" />,
+    delete: <path d="M4 7h16m-10 4v5m4-5v5M9 7l1-3h4l1 3m-9 0 1 13h10l1-13" />,
     history: <path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5m4-4v7l5 3" />,
     pause: <path d="M8 5v14M16 5v14" />,
     send: <path d="m21 3-7.5 18-3.8-7.7L3 9.5 21 3Zm-11.4 10.3L15 9" />,
@@ -56,7 +57,9 @@ interface SidebarProps {
   activeId: string | null;
   workspace: string | null;
   creating: boolean;
+  deletingId: string | null;
   onCreate: () => void;
+  onDelete: (conversationId: string) => void;
   onSelect: (conversationId: string) => void;
 }
 
@@ -66,7 +69,9 @@ export function Sidebar({
   activeId,
   workspace,
   creating,
+  deletingId,
   onCreate,
+  onDelete,
   onSelect,
 }: SidebarProps) {
   return (
@@ -90,22 +95,35 @@ export function Sidebar({
         {sessions.length === 0 ? (
           <p className="empty-list">尚无会话</p>
         ) : (
-          sessions.map((session) => (
-            <button
-              className={`conversation-item ${session.conversation_id === activeId ? "active" : ""}`}
-              key={session.conversation_id}
-              type="button"
-              onClick={() => onSelect(session.conversation_id)}
-            >
-              <span className="conversation-item-top">
-                <span className="conversation-name">会话 {session.conversation_id.slice(0, 6)}</span>
-                <StateDot state={session.state} />
-              </span>
-              <span className="conversation-item-bottom">
-                {stateLabel(session.state)} · {session.turn_count}/{session.max_turns} 轮
-              </span>
-            </button>
-          ))
+          sessions.map((session) => {
+            const isDeleting = deletingId === session.conversation_id;
+            return (
+              <div className="conversation-row" key={session.conversation_id}>
+                <button
+                  className={`conversation-item ${session.conversation_id === activeId ? "active" : ""}`}
+                  type="button"
+                  onClick={() => onSelect(session.conversation_id)}
+                >
+                  <span className="conversation-item-top">
+                    <span className="conversation-name">会话 {session.conversation_id.slice(0, 6)}</span>
+                    <StateDot state={session.state} />
+                  </span>
+                  <span className="conversation-item-bottom">
+                    {stateLabel(session.state)} · {session.turn_count}/{session.max_turns} 轮
+                  </span>
+                </button>
+                <button
+                  aria-label={`删除会话 ${session.conversation_id.slice(0, 8)}`}
+                  className="delete-conversation"
+                  disabled={isDeleting}
+                  type="button"
+                  onClick={() => onDelete(session.conversation_id)}
+                >
+                  <Icon name="delete" size={15} />
+                </button>
+              </div>
+            );
+          })
         )}
       </nav>
       <p className="local-only">仅本机访问 · 数据不离开当前服务</p>

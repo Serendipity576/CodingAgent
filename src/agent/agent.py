@@ -194,6 +194,12 @@ class CodingAgent:
                         result=result,
                         duration_ms=duration_ms,
                     )
+                output = ToolOutput(call_id=call.call_id, output=result.as_observation())
+                outputs.append(output)
+                # ResponsesClient persists each observation immediately. A
+                # process restart after a tool finishes must not leave the
+                # restored transcript with an unanswered function call.
+                _record_tool_outputs(self._llm, (output,))
                 self._emit(
                     "tool_finished",
                     {
@@ -208,7 +214,6 @@ class CodingAgent:
                         "output_chars": len(result.output),
                     },
                 )
-                outputs.append(ToolOutput(call_id=call.call_id, output=result.as_observation()))
 
                 if result.success:
                     last_failure_signature = None
@@ -271,6 +276,14 @@ def _is_cancellation_check(value: object | None) -> bool:
     """Accept event-like cancellation objects without importing threading types."""
 
     return callable(getattr(value, "is_set", None))
+
+
+def _record_tool_outputs(llm: object, outputs: tuple[ToolOutput, ...]) -> None:
+    """Use optional durable-history support without constraining test LLMs."""
+
+    recorder = getattr(llm, "record_tool_outputs", None)
+    if callable(recorder):
+        recorder(outputs)
 
 
 def _event_argument_summary(call: ToolCall) -> dict[str, object]:

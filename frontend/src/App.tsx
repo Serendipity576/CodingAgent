@@ -28,6 +28,7 @@ const SSE_EVENT_NAMES = [
   "assistant_message",
   "agent_finished",
   "conversation_turn_finished",
+  "conversation_interrupted",
   "approval_required",
   "approval_resolved",
   "conversation_limit_reached",
@@ -47,6 +48,7 @@ export default function App() {
   const [message, setMessage] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [resolvingApproval, setResolvingApproval] = useState(false);
@@ -100,6 +102,30 @@ export default function App() {
       setNotice(messageFromError(error, "无法读取会话"));
     }
   }, [updateSession]);
+
+  /** Remove one local transcript only after the user confirms its permanent deletion. */
+  const deleteConversation = useCallback(async (conversationId: string) => {
+    if (deletingId || !window.confirm("删除后无法恢复该会话及其本地记录，确定继续吗？")) {
+      return;
+    }
+    setDeletingId(conversationId);
+    setNotice(null);
+    try {
+      await api.deleteConversation(conversationId);
+      sequences.current.delete(conversationId);
+      setEventsBySession((previous) => removeConversationEntry(previous, conversationId));
+      setApprovals((previous) => removeConversationEntry(previous, conversationId));
+      const remaining = sessions.filter((item) => item.conversation_id !== conversationId);
+      setSessions(remaining);
+      if (activeId === conversationId) {
+        setActiveId(remaining[0]?.conversation_id ?? null);
+      }
+    } catch (error) {
+      setNotice(messageFromError(error, "会话未能删除"));
+    } finally {
+      setDeletingId(null);
+    }
+  }, [activeId, deletingId, sessions]);
 
   /** Store one event once even when an SSE reconnect replays earlier events. */
   const appendEvent = useCallback((conversationId: string, event: ConversationEvent) => {
@@ -160,7 +186,7 @@ export default function App() {
       if (pending) {
         setApprovals((previous) => ({ ...previous, [activeId]: pending }));
       }
-      if (event.event === "approval_resolved") {
+      if (event.event === "approval_resolved" || event.event === "conversation_interrupted") {
         setApprovals((previous) => removeApproval(previous, activeId));
       }
       if (shouldRefreshSnapshot(event.event)) {
@@ -242,7 +268,9 @@ export default function App() {
       <Sidebar
         activeId={activeId}
         creating={creating}
+        deletingId={deletingId}
         onCreate={() => void createConversation()}
+        onDelete={(conversationId) => void deleteConversation(conversationId)}
         onSelect={(conversationId) => void selectConversation(conversationId)}
         sessions={sessions}
         workspace={config?.workspace ?? null}
@@ -252,7 +280,7 @@ export default function App() {
           <div>
             <p className="eyebrow">LOCAL WORKSPACE</p>
             <h1>{activeSession ? `会话 ${activeSession.conversation_id.slice(0, 8)}` : "Coding Agent 工作台"}</h1>
-            {activeSession && <p className="session-subtitle">{stateLabel(activeSession.state)} · 本地 history 仅保留在当前进程</p>}
+            {activeSession && <p className="session-subtitle">{stateLabel(activeSession.state)} · history 保存在当前 workspace</p>}
           </div>
           {activeSession && <span className={`header-state state-${activeSession.state}`}>{stateLabel(activeSession.state)}</span>}
         </header>
@@ -290,6 +318,7 @@ function shouldRefreshSnapshot(eventName: string): boolean {
   return [
     "conversation_turn_started",
     "conversation_turn_finished",
+    "conversation_interrupted",
     "conversation_limit_reached",
     "conversation_closed",
   ].includes(eventName);
@@ -319,6 +348,15 @@ function removeApproval(
   conversationId: string,
 ): Record<string, ApprovalRequest> {
   const { [conversationId]: _, ...remaining } = approvals;
+  return remaining;
+}
+
+/** Remove stale state for a permanently deleted conversation without mutation. */
+function removeConversationEntry<T>(
+  entries: Record<string, T>,
+  conversationId: string,
+): Record<string, T> {
+  const { [conversationId]: _, ...remaining } = entries;
   return remaining;
 }
 

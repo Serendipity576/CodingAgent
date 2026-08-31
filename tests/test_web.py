@@ -72,6 +72,9 @@ class WebApplicationTests(unittest.TestCase):
                         f"/api/conversations/{session['conversation_id']}/messages",
                         json={"text": "Explain the workspace."},
                     )
+                    _wait_for_finished_turn(
+                        client.app.state.manager.get(session["conversation_id"]),
+                    )
 
         self.assertEqual(page.status_code, 200)
         self.assertIn("Coding Agent", page.text)
@@ -85,6 +88,30 @@ class WebApplicationTests(unittest.TestCase):
         self.assertNotIn("test-key", config.text)
         self.assertEqual(created.status_code, 201)
         self.assertEqual(queued.status_code, 202)
+
+    def test_web_restores_and_deletes_a_local_session(self) -> None:
+        """Keep the browser-visible metadata across app instances until deletion."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            settings = _settings(workspace)
+            with patch(
+                "agent.conversation.build_llm_client",
+                side_effect=[_FinalLLM(), _FinalLLM()],
+            ):
+                with TestClient(create_app(settings, workspace)) as first_client:
+                    created = first_client.post("/api/conversations")
+                    conversation_id = created.json()["conversation_id"]
+
+                with TestClient(create_app(settings, workspace)) as restored_client:
+                    listed = restored_client.get("/api/conversations")
+                    deleted = restored_client.delete(f"/api/conversations/{conversation_id}")
+                    missing = restored_client.get(f"/api/conversations/{conversation_id}")
+
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual([item["conversation_id"] for item in listed.json()], [conversation_id])
+        self.assertEqual(deleted.status_code, 204)
+        self.assertEqual(missing.status_code, 404)
 
 
 class _FinalLLM:
@@ -106,6 +133,21 @@ def _wait_for_approval(events: list[tuple[str, dict[str, object]]]) -> str:
                 return str(details["approval_id"])
         sleep(0.01)
     raise AssertionError("approval request was not published")
+
+
+def _wait_for_finished_turn(session: object | None) -> None:
+    """Wait for the daemon worker before the temporary workspace is removed."""
+
+    if session is None:
+        raise AssertionError("created Web session is unavailable")
+    deadline = monotonic() + 2
+    sequence = 0
+    while monotonic() < deadline:
+        for item in session.events_after(sequence, timeout_seconds=0.1):
+            sequence = item.sequence
+            if item.event == "conversation_turn_finished":
+                return
+    raise AssertionError("Web conversation turn did not finish")
 
 
 def _settings(workspace: Path) -> Settings:

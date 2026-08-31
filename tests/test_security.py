@@ -99,6 +99,30 @@ class SecurityPolicyTests(unittest.TestCase):
                 self.assertEqual(result.policy, "sensitive_data")
             self.assertFalse((workspace / "id_ed25519").exists())
 
+    def test_local_conversation_database_is_denied_to_agent_tools(self) -> None:
+        """Keep durable model context and event journals outside Agent tool access."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            database = workspace / ".agent" / "conversations" / "sessions.sqlite3"
+            database.parent.mkdir(parents=True)
+            database.write_text("local transcript", encoding="utf-8")
+
+            result = build_default_registry(workspace).execute(
+                _call("read_file", {"path": ".agent/conversations/sessions.sqlite3"}),
+                _context(workspace),
+            )
+            listed = build_default_registry(workspace).execute(
+                _call("list_files", {"path": ".", "max_depth": 2}),
+                _context(workspace),
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.decision, Decision.DENY.value)
+        self.assertEqual(result.policy, "sensitive_data")
+        self.assertTrue(listed.success)
+        self.assertNotIn(".agent", listed.output)
+
     def test_sensitive_parent_directory_does_not_block_the_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "secrets"
