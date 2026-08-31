@@ -53,6 +53,7 @@ export default function App() {
   const [cancelling, setCancelling] = useState(false);
   const [resolvingApproval, setResolvingApproval] = useState(false);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
+  const [inspectorOpen, setInspectorOpen] = useState(true);
   const sequences = useRef(new Map<string, number>());
 
   const activeSession = sessions.find((session) => session.conversation_id === activeId) ?? null;
@@ -264,7 +265,7 @@ export default function App() {
 
   const composerDisabled = !activeSession || ["closed", "limit_reached"].includes(activeSession.state);
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${inspectorOpen ? "inspector-open" : "inspector-closed"}`}>
       <Sidebar
         activeId={activeId}
         creating={creating}
@@ -282,7 +283,18 @@ export default function App() {
             <h1>{activeSession ? `会话 ${activeSession.conversation_id.slice(0, 8)}` : "Coding Agent 工作台"}</h1>
             {activeSession && <p className="session-subtitle">{stateLabel(activeSession.state)} · history 保存在当前 workspace</p>}
           </div>
-          {activeSession && <span className={`header-state state-${activeSession.state}`}>{stateLabel(activeSession.state)}</span>}
+          <div className="workspace-actions">
+            {activeSession && <span className={`header-state state-${activeSession.state}`}>{stateLabel(activeSession.state)}</span>}
+            <button
+              aria-label={inspectorOpen ? "收起运行详情" : "展开运行详情"}
+              className={`inspector-toggle ${inspectorOpen ? "active" : ""}`}
+              type="button"
+              onClick={() => setInspectorOpen((open) => !open)}
+            >
+              <Icon name="panel" size={17} />
+              <span>{inspectorOpen ? "收起详情" : "运行详情"}</span>
+            </button>
+          </div>
         </header>
         {notice && (
           <div className="notice" role="alert">
@@ -306,6 +318,7 @@ export default function App() {
         config={config}
         connection={connection}
         onCancel={() => void cancel()}
+        open={inspectorOpen}
         session={activeSession}
       />
       <ApprovalDialog approval={activeApproval} onResolve={(approved) => void resolveApproval(approved)} resolving={resolvingApproval} />

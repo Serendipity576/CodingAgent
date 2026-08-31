@@ -1,5 +1,5 @@
 // Presentational components deliberately receive safe API data rather than LLM history.
-import type { FormEvent, KeyboardEvent, ReactNode } from "react";
+import { useEffect, useRef, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 
 import {
   eventLabel,
@@ -17,7 +17,7 @@ import type {
   TaskSummary,
 } from "./types";
 
-type IconName = "add" | "arrow" | "close" | "code" | "delete" | "history" | "pause" | "send";
+type IconName = "add" | "arrow" | "close" | "code" | "delete" | "history" | "panel" | "pause" | "send";
 
 interface IconProps {
   name: IconName;
@@ -45,6 +45,7 @@ export function Icon({ name, size = 18 }: IconProps) {
     code: <path d="m8 9-3 3 3 3m8-6 3 3-3 3M14 5l-4 14" />,
     delete: <path d="M4 7h16m-10 4v5m4-5v5M9 7l1-3h4l1 3m-9 0 1 13h10l1-13" />,
     history: <path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5m4-4v7l5 3" />,
+    panel: <path d="M4 5h16v14H4zm10 0v14M7 9h4m-4 3h4" />,
     pause: <path d="M8 5v14M16 5v14" />,
     send: <path d="m21 3-7.5 18-3.8-7.7L3 9.5 21 3Zm-11.4 10.3L15 9" />,
   };
@@ -78,17 +79,20 @@ export function Sidebar({
     <aside className="sidebar">
       <div className="brand">
         <span className="brand-mark"><Icon name="code" size={20} /></span>
-        <span>Coding Agent</span>
+        <span className="brand-copy"><strong>Coding Agent</strong><small>LOCAL WORKBENCH</small></span>
       </div>
-      <p className="workspace-path" title={workspace ?? undefined}>
-        {workspace ?? "正在连接本地服务…"}
-      </p>
+      <div className="workspace-context">
+        <span>WORKSPACE</span>
+        <p className="workspace-path" title={workspace ?? undefined}>
+          {workspace ?? "正在连接本地服务…"}
+        </p>
+      </div>
       <button className="new-conversation" type="button" onClick={onCreate} disabled={creating}>
         <Icon name="add" />
         {creating ? "正在创建" : "新建会话"}
       </button>
       <div className="sidebar-heading">
-        <span>会话</span>
+        <span>会话历史</span>
         <span className="count-badge">{sessions.length}</span>
       </div>
       <nav className="conversation-list" aria-label="会话列表">
@@ -126,7 +130,7 @@ export function Sidebar({
           })
         )}
       </nav>
-      <p className="local-only">仅本机访问 · 数据不离开当前服务</p>
+      <p className="local-only">仅本机访问<br />会话数据保留在 workspace</p>
     </aside>
   );
 }
@@ -220,6 +224,7 @@ function ToolCard({ event }: { event: ConversationEvent }) {
   const duration = numberDetail(event, "duration_ms");
   const argumentsValue = event.details.arguments;
   const error = stringDetail(event, "error");
+  const status = requested ? "执行中" : success ? "已完成" : "需要关注";
 
   return (
     <article className={`tool-card ${requested ? "pending" : success ? "success" : "failed"}`}>
@@ -227,14 +232,15 @@ function ToolCard({ event }: { event: ConversationEvent }) {
         <span className="tool-card-icon"><Icon name="code" size={16} /></span>
         <div>
           <strong>{tool}</strong>
-          <span>{requested ? "等待执行" : success ? "执行成功" : "未执行或执行失败"}</span>
+          <span>{requested ? "正在等待工具执行" : success ? "工具执行成功" : "工具未执行或执行失败"}</span>
         </div>
+        <span className="tool-status">{status}</span>
         <time>{formatTime(event.timestamp)}</time>
       </div>
-      {!requested && duration !== null && <p className="tool-result-meta">耗时 {duration} ms</p>}
+      {!requested && duration !== null && <p className="tool-result-meta">执行耗时 {duration} ms</p>}
       {error && <p className="tool-error">{error}</p>}
       {requested && argumentsValue !== undefined && (
-        <details>
+        <details className="tool-details">
           <summary>查看安全参数摘要</summary>
           <pre>{formatDetails(argumentsValue)}</pre>
         </details>
@@ -245,7 +251,12 @@ function ToolCard({ event }: { event: ConversationEvent }) {
 
 /** Render non-message lifecycle events without flooding the conversation. */
 function SystemCard({ event }: { event: ConversationEvent }) {
-  const isAttention = ["approval_required", "conversation_limit_reached", "turn_cancel_requested"].includes(event.event);
+  const isAttention = [
+    "approval_required",
+    "conversation_interrupted",
+    "conversation_limit_reached",
+    "turn_cancel_requested",
+  ].includes(event.event);
   const message = stringDetail(event, "message");
   const reason = stringDetail(event, "reason");
   return (
@@ -270,6 +281,21 @@ interface ComposerProps {
 
 /** Provide keyboard-friendly task entry without allowing a blank submission. */
 export function Composer({ value, disabled, submitting, onChange, onSubmit }: ComposerProps) {
+  const textarea = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    const element = textarea.current;
+    if (!element) {
+      return;
+    }
+    // Let the field follow its content until it reaches a compact chat-sized
+    // limit, then keep additional text inside the textarea's own scrollbar.
+    element.style.height = "0px";
+    const height = Math.min(element.scrollHeight, 216);
+    element.style.height = `${height}px`;
+    element.style.overflowY = element.scrollHeight > height ? "auto" : "hidden";
+  }, [value]);
+
   const submit = (event: FormEvent) => {
     event.preventDefault();
     onSubmit();
@@ -283,21 +309,29 @@ export function Composer({ value, disabled, submitting, onChange, onSubmit }: Co
 
   return (
     <form className="composer" onSubmit={submit}>
-      <textarea
-        aria-label="任务消息"
-        disabled={disabled}
-        onChange={(event) => onChange(event.target.value)}
-        onKeyDown={onKeyDown}
-        placeholder={disabled ? "请先新建或选择一个可用会话" : "描述任务，Enter 发送，Shift + Enter 换行"}
-        rows={3}
-        value={value}
-      />
+      <div className="composer-field">
+        <textarea
+          aria-label="任务消息"
+          disabled={disabled}
+          onChange={(event) => onChange(event.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder={disabled ? "请先新建或选择一个可用会话" : "给 Coding Agent 发送消息"}
+          ref={textarea}
+          rows={1}
+          value={value}
+        />
+        <button
+          aria-label="发送消息"
+          className="composer-send"
+          disabled={disabled || submitting || !value.trim()}
+          type="submit"
+        >
+          <Icon name="send" size={17} />
+        </button>
+      </div>
       <div className="composer-footer">
         <span>Enter 发送 · Shift + Enter 换行</span>
-        <button className="primary-button" disabled={disabled || submitting || !value.trim()} type="submit">
-          <Icon name="send" />
-          {submitting ? "发送中" : "发送"}
-        </button>
+        {submitting && <span>正在发送…</span>}
       </div>
     </form>
   );
@@ -309,13 +343,14 @@ interface InspectorProps {
   connection: "connecting" | "connected" | "reconnecting" | "error";
   onCancel: () => void;
   cancelling: boolean;
+  open: boolean;
 }
 
 /** Present session limits and result summaries without exposing LLM history. */
-export function Inspector({ config, session, connection, onCancel, cancelling }: InspectorProps) {
+export function Inspector({ config, session, connection, onCancel, cancelling, open }: InspectorProps) {
   const isRunning = session?.state === "running";
   return (
-    <aside className="inspector">
+    <aside aria-hidden={!open} className={`inspector ${open ? "open" : "collapsed"}`}>
       <div className="inspector-title-row">
         <h2>运行信息</h2>
         <span className={`connection connection-${connection}`}>
