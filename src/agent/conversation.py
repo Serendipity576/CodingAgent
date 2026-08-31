@@ -194,6 +194,7 @@ class ConversationSession:
                 "workspace": str(self.workspace),
                 "state": self._state.value,
                 "turn_count": self._turn_count,
+                "max_turns": self._max_turns,
                 "queued_messages": len(self._queue),
                 "history_items": self._history_item_count(),
                 "max_history_items": self._max_history_items,

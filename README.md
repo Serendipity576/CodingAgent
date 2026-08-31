@@ -60,7 +60,27 @@ Start the local Web interface:
 coding-agent serve --workspace /path/to/project
 ```
 
-Open `http://127.0.0.1:8765`. The page shows conversation messages, tool and policy events, test/changed-file summaries, cancellation status, and high-risk approval prompts. It communicates with the local server through REST and server-sent events; it never receives the API key or provider reasoning data. The server rejects non-loopback hosts.
+Open `http://127.0.0.1:8765`. This is a React workbench with a session sidebar, typed event timeline, collapsible tool cards, execution summary, cancellation controls, and high-risk approval dialog. It communicates with the local server through REST and server-sent events; it never receives the API key or provider reasoning data. The server rejects non-loopback hosts.
+
+### Web frontend development
+
+The production bundle is served from `src/agent/web/static/` and is included in
+the Python package. To rebuild it after changing the React source, use Node.js
+20.19 or later:
+
+```bash
+cd frontend
+npm ci
+npm run build
+```
+
+`node_modules/` is local-only. Commit the React source, `package-lock.json`, and
+the regenerated `src/agent/web/static/` bundle so `coding-agent serve` works
+after a normal Python installation without a separate Node.js step.
+
+For hot-reload development, start `coding-agent serve` in one terminal and run
+`npm run dev` in another; then open `http://127.0.0.1:5173/static/`. Vite proxies
+only `/api` to the loopback FastAPI service.
 
 One workspace executes one Agent turn at a time, even across several browser conversations. Sessions have turn and local-history-item limits; when a limit is reached, start a new conversation rather than silently discarding provider continuation data.
 

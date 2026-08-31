@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import tempfile
 from threading import Thread
 from time import monotonic, sleep
@@ -74,6 +75,12 @@ class WebApplicationTests(unittest.TestCase):
 
         self.assertEqual(page.status_code, 200)
         self.assertIn("Coding Agent", page.text)
+        self.assertIn('<div id="root">', page.text)
+        script = re.search(r'src="/static/(assets/[^\"]+\.js)"', page.text)
+        self.assertIsNotNone(script)
+        bundle = client.get(f"/static/{script.group(1)}")
+        self.assertEqual(bundle.status_code, 200)
+        self.assertIn("javascript", bundle.headers["content-type"])
         self.assertEqual(config.status_code, 200)
         self.assertNotIn("test-key", config.text)
         self.assertEqual(created.status_code, 201)

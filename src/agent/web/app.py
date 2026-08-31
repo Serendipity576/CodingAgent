@@ -10,6 +10,7 @@ from typing import Annotated
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from agent.config import Settings
@@ -40,17 +41,13 @@ def create_app(settings: Settings, workspace: Path) -> FastAPI:
 
     @app.get("/")
     async def index() -> FileResponse:
-        """Serve the dependency-free local conversation page."""
+        """Serve the React application's built entry page."""
 
         return FileResponse(static_dir / "index.html")
 
-    @app.get("/static/{asset_name}")
-    async def static_asset(asset_name: str) -> FileResponse:
-        """Serve a fixed local asset without exposing arbitrary file paths."""
-
-        if asset_name not in {"app.js", "styles.css"}:
-            raise HTTPException(status_code=404, detail="asset not found")
-        return FileResponse(static_dir / asset_name)
+    # StaticFiles confines requests to the pre-built Web bundle directory; it
+    # never resolves browser-provided paths outside this application asset root.
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
     @app.get("/api/config")
     async def config() -> dict[str, object]:

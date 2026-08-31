@@ -20,3 +20,8 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["agent*"]
+exclude = ["guarded_agent", "guarded_agent.*"]
+
+[tool.setuptools.package-data]
+"agent.web" = ["static/*.html", "static/assets/*.js", "static/assets/*.css"]
