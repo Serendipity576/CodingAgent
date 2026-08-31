@@ -29,9 +29,19 @@ class ToolOutput:
 
 
 @dataclass(frozen=True, slots=True)
+class Usage:
+    """Provider-neutral token accounting for one completed model response."""
+
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
 class ModelResponse:
     """Normalized model output for one agent turn."""
 
     response_id: str
-    text: str
+    text: str | None
     tool_calls: tuple[ToolCall, ...]
+    usage: Usage | None = None

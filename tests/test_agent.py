@@ -26,7 +26,6 @@ class ScriptedLLM:
         instructions: str,
         task: str | None,
         tools: Sequence[Mapping[str, object]],
-        previous_response_id: str | None,
         tool_outputs: Sequence[ToolOutput],
     ) -> ModelResponse:
         self.requests.append(
@@ -34,7 +33,6 @@ class ScriptedLLM:
                 "instructions": instructions,
                 "task": task,
                 "tools": tools,
-                "previous_response_id": previous_response_id,
                 "tool_outputs": tool_outputs,
             }
         )
@@ -121,8 +119,9 @@ class CodingAgentTests(unittest.TestCase):
                 + result.tool_calls[-1].result.output,
             )
             self.assertIn("return left + right", (workspace / "app.py").read_text())
-            self.assertIsNone(llm.requests[0]["previous_response_id"])
-            self.assertEqual(llm.requests[1]["previous_response_id"], "response-1")
+            self.assertEqual(llm.requests[0]["task"], "Fix the failing test.")
+            self.assertIsNone(llm.requests[1]["task"])
+            self.assertEqual(len(llm.requests[1]["tool_outputs"]), 1)
             self.assertIsNotNone(result.summary)
             assert result.summary is not None
             self.assertEqual(result.summary.modified_files, ("app.py",))

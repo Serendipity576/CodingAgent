@@ -11,7 +11,7 @@ from agent.agent import CodingAgent
 from agent.audit import AuditLogger
 from agent.change_tracker import GitStatusSnapshot
 from agent.config import ConfigurationError, load_settings
-from agent.llm.client import LLMConfigurationError, OpenAIResponsesClient
+from agent.llm.client import LLMConfigurationError, build_llm_client
 from agent.security.approval import ConsoleApproval
 from agent.tools import build_default_registry
 
@@ -27,10 +27,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--workspace",
         metavar="PATH",
         help="Project directory the agent will operate in (default: current directory).",
-    )
-    parser.add_argument(
-        "--model",
-        help="LLM model name (default: MODEL_NAME or gpt-5).",
     )
     parser.add_argument(
         "--max-steps",
@@ -87,7 +83,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         settings = load_settings(
             workspace=arguments.workspace,
-            model=arguments.model,
             max_steps=arguments.max_steps,
             command_timeout_seconds=arguments.command_timeout_seconds,
             max_output_chars=arguments.max_output_chars,
@@ -103,7 +98,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     try:
-        llm = OpenAIResponsesClient(settings)
+        llm = build_llm_client(settings)
         audit_logger = AuditLogger.create(settings.workspace)
         git_baseline = GitStatusSnapshot.capture(settings.workspace)
         agent = CodingAgent(

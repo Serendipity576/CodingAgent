@@ -27,7 +27,6 @@ class SingleResponseLLM:
         instructions: str,
         task: str | None,
         tools: Sequence[Mapping[str, object]],
-        previous_response_id: str | None,
         tool_outputs: Sequence[ToolOutput],
     ) -> ModelResponse:
         return self._response

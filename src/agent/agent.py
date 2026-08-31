@@ -88,7 +88,6 @@ class CodingAgent:
             audit_logger.task_started(task_context.task, git_baseline)
 
         started_at = monotonic()
-        previous_response_id: str | None = None
         next_task: str | None = task_context.task
         pending_outputs: tuple[ToolOutput, ...] = ()
         executed: list[ExecutedToolCall] = []
@@ -132,13 +131,11 @@ class CodingAgent:
                     instructions=task_context.instructions,
                     task=next_task,
                     tools=self._tools.schemas(),
-                    previous_response_id=previous_response_id,
                     tool_outputs=pending_outputs,
                 )
             except LLMRequestError as error:
                 return finish(TaskStatus.LLM_ERROR, str(error))
 
-            previous_response_id = response.response_id
             next_task = None
             if not response.tool_calls:
                 return finish(

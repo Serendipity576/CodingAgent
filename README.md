@@ -19,13 +19,26 @@ python -m unittest discover -s tests -t .
 
 `--print-config` never prints the API key. It is only a startup check; it does not call an LLM or execute any local tool.
 
-To run a task, install dependencies and provide an API key through the environment:
+To run a task, put compatible Responses connection fields in an untracked `.env`
+file in the directory where you run the command:
 
 ```bash
-python -m pip install .
-export OPENAI_API_KEY="your_api_key"
-coding-agent --workspace /path/to/project --task "Fix the failing tests."
+cat > .env <<'EOF'
+CODING_AGENT_API_KEY="your_api_key"
+CODING_AGENT_BASE_URL="https://llm.example.com/v1"
+CODING_AGENT_MODEL="compatible-model"
+CODING_AGENT_PROVIDER="responses"
+CODING_AGENT_MAX_OUTPUT_TOKENS="2048"
+EOF'
+
+coding-agent \
+  --workspace /path/to/project \
+  --task "Fix the failing tests."
 ```
+
+Every endpoint uses the same client-owned, stateless transcript: the initial task, original response items, and tool outputs are resubmitted on each turn. The client never sends `previous_response_id` or creates a server-side conversation. This follows DeepSeek's [Responses API compatibility guide](https://api-docs.deepseek.com/guides/responses_api/) and OpenAI's [stateless Responses guidance](https://developers.openai.com/api/reference/cli/resources/responses/methods/create).
+
+Compatibility requires the service to support the OpenAI Responses API with `input` items and custom function tools. A service that implements only the legacy Chat Completions API is outside this interface. The CLI never asks for a provider name: endpoint-specific request options are selected inside the LLM layer, while unfamiliar compatible endpoints use the shared request format.
 
 The model may use `list_files`, `read_file`, `apply_patch`, and `run_command`. `apply_patch` replaces one exact, unique text fragment; `run_command` accepts an executable and arguments rather than shell syntax.
 
@@ -69,21 +82,24 @@ This is a deterministic policy demonstration, not evidence that every model will
 
 ## Configuration
 
-CLI arguments override environment variables.
+LLM connection settings are read from `.env` only. The main CLI does not accept
+provider, API, endpoint, model, or generated-token settings as arguments.
 
-| Setting | Environment variable | Default |
+| Setting | Configuration source | Default |
 | --- | --- | --- |
-| Workspace | `CODING_AGENT_WORKSPACE` | Current directory |
-| Model | `MODEL_NAME` | `gpt-5` |
-| API key | `OPENAI_API_KEY` | Not set |
-| Base URL | `OPENAI_BASE_URL` | Not set |
+| Workspace | `--workspace` or `CODING_AGENT_WORKSPACE` | Current directory |
+| Provider | `CODING_AGENT_PROVIDER` in `.env` | Not set; required for a task |
+| Model | `CODING_AGENT_MODEL` in `.env` | Not set; required for a task |
+| API key | `CODING_AGENT_API_KEY` in `.env` | Not set; required for a task |
+| Base URL | `CODING_AGENT_BASE_URL` in `.env` | Not set; required for a task |
+| Maximum generated tokens | `CODING_AGENT_MAX_OUTPUT_TOKENS` in `.env` | Not set |
 | Maximum steps | `CODING_AGENT_MAX_STEPS` | `20` |
 | Command timeout | `CODING_AGENT_COMMAND_TIMEOUT_SECONDS` | `60` seconds |
 | Tool output limit | `CODING_AGENT_MAX_OUTPUT_CHARS` | `20000` characters |
 | Task timeout | `CODING_AGENT_MAX_TASK_SECONDS` | `900` seconds |
 | Repeated tool failure limit | `CODING_AGENT_MAX_CONSECUTIVE_TOOL_FAILURES` | `2` |
 
-Store `OPENAI_API_KEY` in the process environment or an untracked local configuration file; never commit it. The official OpenAI documentation recommends loading API keys from environment variables rather than exposing them in application code.
+Store `CODING_AGENT_API_KEY` in the untracked local `.env` file; never commit it. The loader reads `CODING_AGENT_PROVIDER`, `CODING_AGENT_API_KEY`, `CODING_AGENT_BASE_URL`, `CODING_AGENT_MODEL`, and the optional `CODING_AGENT_MAX_OUTPUT_TOKENS` as literal values. It does not expand or execute its contents. Set `CODING_AGENT_PROVIDER` to `openai`, `deepseek`, or `responses`; the final value selects the corresponding internal adapter without inferring it from the URL.
 
 ## Development plan
 
