@@ -87,6 +87,9 @@ class ConversationSession:
         self.id = restored.conversation_id if restored else uuid4().hex
         self._created_at = restored.created_at if restored else time()
         self._events: list[ConversationEvent] = []
+        # Browser retries reuse this bounded per-session id set so one accepted
+        # message cannot become two turns when the HTTP response is lost.
+        self._client_message_ids: set[str] = set()
         self._events_ready = Condition(RLock())
         self._queue: deque[str] = deque()
         self._lock = RLock()
@@ -125,13 +128,19 @@ class ConversationSession:
         with self._lock:
             return self._latest_result
 
-    def submit(self, message: str) -> bool:
-        """Queue a user message and start the serial worker when necessary."""
+    def submit(self, message: str, *, client_message_id: str | None = None) -> bool:
+        """Queue one user message, accepting an exact browser retry only once."""
 
         text = message.strip()
         if not text:
             raise ValueError("message must not be empty")
+        if client_message_id is not None and (
+            not client_message_id.strip() or len(client_message_id) > 128
+        ):
+            raise ValueError("client_message_id must contain at most 128 characters")
         with self._lock:
+            if client_message_id is not None and client_message_id in self._client_message_ids:
+                return True
             if self._deleted or self._state in {
                 ConversationState.CLOSED,
                 ConversationState.LIMIT_REACHED,
@@ -152,7 +161,12 @@ class ConversationSession:
                 )
                 return False
             self._queue.append(text)
-            self.publish("user_message", {"text": text})
+            if client_message_id is not None:
+                self._client_message_ids.add(client_message_id)
+            details: dict[str, object] = {"text": text}
+            if client_message_id is not None:
+                details["client_message_id"] = client_message_id
+            self.publish("user_message", details)
             if self._worker is None or not self._worker.is_alive():
                 self._worker = Thread(target=self._run_queue, daemon=True)
                 self._worker.start()
@@ -276,6 +290,14 @@ class ConversationSession:
                 )
                 for item in restored.events
             ]
+        self._client_message_ids = {
+            client_message_id
+            for item in self._events
+            if item.event == "user_message"
+            and isinstance(
+                client_message_id := item.details.get("client_message_id"), str
+            )
+        }
         self._turn_count = restored.turn_count
         self._max_turns = restored.max_turns
         self._max_history_items = restored.max_history_items

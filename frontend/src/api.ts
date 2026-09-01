@@ -31,11 +31,11 @@ export const api = {
     request<ConversationSnapshot>("/api/conversations", { method: "POST" }),
   deleteConversation: (conversationId: string) =>
     request<void>(`/api/conversations/${conversationId}`, { method: "DELETE" }),
-  sendMessage: (conversationId: string, text: string) =>
+  sendMessage: (conversationId: string, text: string, clientMessageId: string) =>
     request<ConversationSnapshot>(`/api/conversations/${conversationId}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, client_message_id: clientMessageId }),
     }),
   cancel: (conversationId: string) =>
     request<{ cancelled: boolean }>(`/api/conversations/${conversationId}/cancel`, {

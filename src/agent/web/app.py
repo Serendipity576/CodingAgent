@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -22,6 +22,7 @@ class MessageBody(BaseModel):
     """One user message submitted from the local browser page."""
 
     text: Annotated[str, Field(min_length=1, max_length=20_000)]
+    client_message_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class ApprovalBody(BaseModel):
@@ -86,7 +87,7 @@ def create_app(settings: Settings, workspace: Path) -> FastAPI:
 
         session = _session_or_404(manager, conversation_id)
         try:
-            accepted = session.submit(body.text)
+            accepted = session.submit(body.text, client_message_id=body.client_message_id)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         if not accepted:
@@ -122,17 +123,31 @@ def create_app(settings: Settings, workspace: Path) -> FastAPI:
         return Response(status_code=204)
 
     @app.get("/api/conversations/{conversation_id}/events")
-    async def events(conversation_id: str, after: int = 0) -> StreamingResponse:
+    async def events(
+        conversation_id: str,
+        after: int = 0,
+        last_event_id: Annotated[str | None, Header()] = None,
+    ) -> StreamingResponse:
         """Stream safe session events, replaying any events after the given id."""
 
         session = _session_or_404(manager, conversation_id)
         return StreamingResponse(
-            _event_stream(session, after),
+            _event_stream(session, _event_cursor(after, last_event_id)),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     return app
+
+
+def _event_cursor(after: int, last_event_id: str | None) -> int:
+    """Prefer the browser's latest received SSE id when it is a valid cursor."""
+
+    try:
+        recovered = int(last_event_id) if last_event_id is not None else after
+    except ValueError:
+        return max(after, 0)
+    return max(after, recovered, 0)
 
 
 async def _event_stream(
