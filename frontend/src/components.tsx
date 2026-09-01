@@ -9,6 +9,7 @@ import {
   formatTime,
   stateLabel,
   stringDetail,
+  turnOutcome,
 } from "./presentation";
 import type {
   ApprovalRequest,
@@ -21,6 +22,8 @@ import type {
 type IconName = "add" | "arrow" | "close" | "code" | "delete" | "history" | "menu" | "panel" | "pause" | "send";
 
 const MESSAGE_EVENTS = new Set(["user_message", "assistant_message"]);
+const DISMISSED_OUTCOME_STORAGE_KEY = "coding-agent:dismissed-turn-outcomes";
+const MAX_DISMISSED_OUTCOMES = 100;
 
 export interface PendingUserMessage {
   clientMessageId: string;
@@ -313,6 +316,75 @@ export function ActivityStatus({ events, session }: ActivityStatusProps) {
       <span className="live-activity-text" key={latest?.sequence ?? "preparing"}>{status}</span>
     </div>
   );
+}
+
+interface TurnOutcomeNoticeProps {
+  maxSteps: number;
+  onOpenActivity: () => void;
+  session: ConversationSnapshot | null;
+}
+
+/** Keep incomplete terminal turns visible until the user dismisses that exact turn result. */
+export function TurnOutcomeNotice({ maxSteps, onOpenActivity, session }: TurnOutcomeNoticeProps) {
+  const [dismissedOutcomes, setDismissedOutcomes] = useState(readDismissedOutcomes);
+  if (!session || session.state === "running") {
+    return null;
+  }
+  const outcome = turnOutcome(session.latest_status, maxSteps);
+  const outcomeKey = outcome ? dismissedOutcomeKey(session) : null;
+  if (!outcome || !outcomeKey || dismissedOutcomes.includes(outcomeKey)) {
+    return null;
+  }
+
+  const dismiss = () => {
+    const next = [...dismissedOutcomes.filter((key) => key !== outcomeKey), outcomeKey]
+      .slice(-MAX_DISMISSED_OUTCOMES);
+    setDismissedOutcomes(next);
+    saveDismissedOutcomes(next);
+  };
+
+  return (
+    <section aria-live="assertive" className={`turn-outcome turn-outcome-${outcome.tone}`} role="alert">
+      <div>
+        <strong>{outcome.title}</strong>
+        <p>{outcome.description}</p>
+      </div>
+      <div className="turn-outcome-actions">
+        <button type="button" onClick={onOpenActivity}>查看记录</button>
+        <button aria-label="关闭本轮提醒" className="turn-outcome-close" type="button" onClick={dismiss}>
+          <Icon name="close" size={15} />
+        </button>
+      </div>
+    </section>
+  );
+}
+
+/** Identify one terminal result without storing task text or conversation history. */
+function dismissedOutcomeKey(session: ConversationSnapshot): string | null {
+  return session.latest_status
+    ? `${session.conversation_id}:${session.turn_count}:${session.latest_status}`
+    : null;
+}
+
+/** Read a bounded list of locally dismissed results; unavailable storage is harmless. */
+function readDismissedOutcomes(): string[] {
+  try {
+    const stored: unknown = JSON.parse(window.localStorage.getItem(DISMISSED_OUTCOME_STORAGE_KEY) ?? "[]");
+    return Array.isArray(stored)
+      ? stored.filter((value): value is string => typeof value === "string").slice(-MAX_DISMISSED_OUTCOMES)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Persist only bounded result identifiers so a closed reminder stays closed after refresh. */
+function saveDismissedOutcomes(outcomes: string[]) {
+  try {
+    window.localStorage.setItem(DISMISSED_OUTCOME_STORAGE_KEY, JSON.stringify(outcomes));
+  } catch {
+    // Storage restrictions should not prevent the user from working with a session.
+  }
 }
 
 /** Keep a compact operational summary in the secondary inspector. */

@@ -1,7 +1,7 @@
 // Root state composition for the independently maintained Web application.
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { api } from "./api";
+import { ApiError, api } from "./api";
 import {
   ActivityDialog,
   ActivityStatus,
@@ -12,6 +12,7 @@ import {
   type PendingUserMessage,
   Sidebar,
   Timeline,
+  TurnOutcomeNotice,
 } from "./components";
 import { approvalFromEvent, stateLabel } from "./presentation";
 import type {
@@ -40,10 +41,55 @@ const SSE_EVENT_NAMES = [
   "conversation_closed",
 ] as const;
 
+const LAST_ACTIVE_CONVERSATION_KEY = "coding-agent:last-active-conversation";
+const BACKGROUND_REFRESH_INTERVAL_MS = 5_000;
+
 type ConnectionState = "connecting" | "connected" | "reconnecting" | "error";
 
 interface PendingMessage extends PendingUserMessage {
   conversationId: string;
+}
+
+interface LastActiveConversation {
+  conversationId: string;
+  workspace: string;
+}
+
+/** Restore a valid browser-local selection without exposing any conversation content. */
+function restoreLastActiveConversation(workspace: string, sessions: ConversationSnapshot[]): string | null {
+  try {
+    const saved: unknown = JSON.parse(window.localStorage.getItem(LAST_ACTIVE_CONVERSATION_KEY) ?? "null");
+    if (!isLastActiveConversation(saved) || saved.workspace !== workspace) {
+      return null;
+    }
+    return sessions.some((session) => session.conversation_id === saved.conversationId)
+      ? saved.conversationId
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Persist only the selected local session identifier for the current workspace. */
+function saveLastActiveConversation(workspace: string, conversationId: string) {
+  try {
+    window.localStorage.setItem(
+      LAST_ACTIVE_CONVERSATION_KEY,
+      JSON.stringify({ conversationId, workspace } satisfies LastActiveConversation),
+    );
+  } catch {
+    // Private browsing or storage restrictions should not affect conversation use.
+  }
+}
+
+/** Narrow untrusted browser storage before using its values for session selection. */
+function isLastActiveConversation(value: unknown): value is LastActiveConversation {
+  return typeof value === "object"
+    && value !== null
+    && "conversationId" in value
+    && "workspace" in value
+    && typeof value.conversationId === "string"
+    && typeof value.workspace === "string";
 }
 
 /** Compose the persistent-conversation workbench from safe local API state. */
@@ -72,6 +118,7 @@ export default function App() {
   const acknowledgedMessages = useRef(new Set<string>());
   const activeIdRef = useRef<string | null>(null);
   const connectedStreams = useRef(new Set<string>());
+  const deletedConversationIds = useRef(new Set<string>());
   const followingLatestRef = useRef(true);
   const conversationStage = useRef<HTMLElement>(null);
 
@@ -80,11 +127,12 @@ export default function App() {
   const activePendingMessages = activeId ? pendingMessages.filter((message) => message.conversationId === activeId) : [];
   const activeApproval = activeId ? approvals[activeId] ?? null : null;
   const message = activeId ? drafts[activeId] ?? "" : "";
-  const sessionIdsKey = sessions.map((session) => session.conversation_id).join("|");
-  const sessionIds = sessionIdsKey ? sessionIdsKey.split("|") : [];
 
   /** Merge one fresh server snapshot without losing the sidebar's stable order. */
   const updateSession = useCallback((snapshot: ConversationSnapshot) => {
+    if (deletedConversationIds.current.has(snapshot.conversation_id)) {
+      return;
+    }
     setSessions((previous) => {
       const index = previous.findIndex((item) => item.conversation_id === snapshot.conversation_id);
       if (index === -1) {
@@ -97,8 +145,11 @@ export default function App() {
   /** Refresh metadata only; history and provider internals never reach the browser. */
   const refreshSessions = useCallback(async () => {
     const snapshots = await api.conversations();
-    setSessions(snapshots);
-    return snapshots;
+    const visibleSnapshots = snapshots.filter(
+      (snapshot) => !deletedConversationIds.current.has(snapshot.conversation_id),
+    );
+    setSessions(visibleSnapshots);
+    return visibleSnapshots;
   }, []);
 
   /** Keep unsent text isolated so changing conversations cannot misroute it. */
@@ -169,10 +220,21 @@ export default function App() {
     if (deletingId || !window.confirm("删除后无法恢复该会话及其本地记录，确定继续吗？")) {
       return;
     }
+    // Keep deletion authoritative while pre-existing SSE and fetch requests settle.
+    deletedConversationIds.current.add(conversationId);
     setDeletingId(conversationId);
     setNotice(null);
     try {
-      await api.deleteConversation(conversationId);
+      try {
+        await api.deleteConversation(conversationId);
+      } catch (error) {
+        if (!(error instanceof ApiError && error.status === 404)) {
+          deletedConversationIds.current.delete(conversationId);
+          void refreshSessions().catch(() => undefined);
+          setNotice(messageFromError(error, "会话未能删除"));
+          return;
+        }
+      }
       sequences.current.delete(conversationId);
       setEventsBySession((previous) => removeConversationEntry(previous, conversationId));
       setApprovals((previous) => removeConversationEntry(previous, conversationId));
@@ -185,12 +247,10 @@ export default function App() {
         setActiveId(remaining[0]?.conversation_id ?? null);
         setActivityDialogOpen(false);
       }
-    } catch (error) {
-      setNotice(messageFromError(error, "会话未能删除"));
     } finally {
       setDeletingId(null);
     }
-  }, [activeId, deletingId, sessions]);
+  }, [activeId, deletingId, refreshSessions, sessions]);
 
   /** Store one event once even when an SSE reconnect replays earlier events. */
   const appendEvent = useCallback((conversationId: string, event: ConversationEvent) => {
@@ -216,7 +276,10 @@ export default function App() {
         }
         setConfig(nextConfig);
         if (snapshots.length > 0) {
-          setActiveId(snapshots[0].conversation_id);
+          setActiveId(
+            restoreLastActiveConversation(nextConfig.workspace, snapshots)
+            ?? snapshots[0].conversation_id,
+          );
         } else {
           setConnection("connected");
         }
@@ -232,73 +295,93 @@ export default function App() {
     };
   }, [refreshSessions]);
 
-  /** Follow every local session so background work can update the sidebar. */
+  /** Remember the selected transcript so a refresh returns to the same local session. */
   useEffect(() => {
-    if (!sessionIdsKey) {
+    if (config && activeId) {
+      saveLastActiveConversation(config.workspace, activeId);
+    }
+  }, [activeId, config]);
+
+  /**
+   * Keep one live stream for the visible transcript. Browsers cap concurrent
+   * HTTP/1.1 connections per origin, so one stream per stored session can
+   * otherwise block deletion, approval, and message requests.
+   */
+  useEffect(() => {
+    if (!activeId || deletedConversationIds.current.has(activeId)) {
       setConnection("connected");
       return;
     }
-    const sources = sessionIds.map((conversationId) => {
-      const after = sequences.current.get(conversationId) ?? 0;
-      const source = new EventSource(`/api/conversations/${conversationId}/events?after=${after}`);
-      const receive = (message: MessageEvent<string>) => {
-        const event = parseConversationEvent(message.data);
-        if (!event) {
-          return;
-        }
-        const clientMessageId = messageClientId(event);
-        if (clientMessageId) {
-          const key = pendingMessageKey(conversationId, clientMessageId);
-          acknowledgedMessages.current.add(key);
-          setPendingMessages((previous) => previous.filter((item) => pendingMessageKey(item.conversationId, item.clientMessageId) !== key));
-        }
-        appendEvent(conversationId, event);
-        const pending = approvalFromEvent(event);
-        if (pending) {
-          setApprovals((previous) => ({ ...previous, [conversationId]: pending }));
-        }
-        if (event.event === "approval_resolved" || event.event === "conversation_interrupted") {
-          setApprovals((previous) => removeApproval(previous, conversationId));
-        }
-        if (
-          conversationId !== activeIdRef.current
-          && (event.event === "assistant_message" || event.event === "approval_required")
-        ) {
-          setUnreadSessions((previous) => ({ ...previous, [conversationId]: true }));
-        }
-        if (shouldRefreshSnapshot(event.event)) {
-          void api.conversation(conversationId).then(updateSession).catch(() => undefined);
-        }
-      };
-      for (const name of SSE_EVENT_NAMES) {
-        source.addEventListener(name, receive);
+    const conversationId = activeId;
+    const after = sequences.current.get(conversationId) ?? 0;
+    const source = new EventSource(`/api/conversations/${conversationId}/events?after=${after}`);
+    const receive = (message: MessageEvent<string>) => {
+      if (deletedConversationIds.current.has(conversationId)) {
+        return;
       }
-      source.onopen = () => {
-        connectedStreams.current.add(conversationId);
-        if (conversationId === activeIdRef.current) {
-          setConnection("connected");
-        }
-      };
-      source.onerror = () => {
-        connectedStreams.current.delete(conversationId);
-        if (conversationId === activeIdRef.current) {
-          setConnection(source.readyState === EventSource.CLOSED ? "error" : "reconnecting");
-        }
-      };
-      return source;
-    });
-    return () => {
-      for (const [index, source] of sources.entries()) {
-        source.close();
-        connectedStreams.current.delete(sessionIds[index]);
+      const event = parseConversationEvent(message.data);
+      if (!event) {
+        return;
+      }
+      const clientMessageId = messageClientId(event);
+      if (clientMessageId) {
+        const key = pendingMessageKey(conversationId, clientMessageId);
+        acknowledgedMessages.current.add(key);
+        setPendingMessages((previous) => previous.filter((item) => pendingMessageKey(item.conversationId, item.clientMessageId) !== key));
+      }
+      appendEvent(conversationId, event);
+      const pending = approvalFromEvent(event);
+      if (pending) {
+        setApprovals((previous) => ({ ...previous, [conversationId]: pending }));
+      }
+      if (event.event === "approval_resolved" || event.event === "conversation_interrupted") {
+        setApprovals((previous) => removeApproval(previous, conversationId));
+      }
+      if (shouldRefreshSnapshot(event.event)) {
+        void api.conversation(conversationId).then(updateSession).catch(() => undefined);
       }
     };
-  }, [appendEvent, sessionIdsKey, updateSession]);
+    for (const name of SSE_EVENT_NAMES) {
+      source.addEventListener(name, receive);
+    }
+    source.onopen = () => {
+      connectedStreams.current.add(conversationId);
+      if (conversationId === activeIdRef.current) {
+        setConnection("connected");
+      }
+    };
+    source.onerror = () => {
+      connectedStreams.current.delete(conversationId);
+      if (conversationId === activeIdRef.current) {
+        setConnection(source.readyState === EventSource.CLOSED ? "error" : "reconnecting");
+      }
+    };
+    return () => {
+      source.close();
+      connectedStreams.current.delete(conversationId);
+    };
+  }, [activeId, appendEvent, updateSession]);
+
+  /** Refresh inactive session metadata without holding a long-lived connection for each one. */
+  useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") {
+        void refreshSessions().catch(() => undefined);
+      }
+    };
+    const interval = window.setInterval(refreshWhenVisible, BACKGROUND_REFRESH_INTERVAL_MS);
+    window.addEventListener("focus", refreshWhenVisible);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshWhenVisible);
+    };
+  }, [refreshSessions]);
 
   /** Update active-stream state and clear its unread marker after session selection. */
   useEffect(() => {
     activeIdRef.current = activeId;
     if (!activeId) {
+      setConnection("connected");
       return;
     }
     setUnreadSessions((previous) => removeConversationEntry(previous, activeId));
@@ -518,6 +601,11 @@ export default function App() {
           />
         </section>
         <ActivityStatus events={activeEvents} session={activeSession} />
+        <TurnOutcomeNotice
+          maxSteps={config?.limits.max_steps ?? 20}
+          onOpenActivity={() => setActivityDialogOpen(true)}
+          session={activeSession}
+        />
         <Composer
           disabled={composerDisabled}
           focusKey={activeId}

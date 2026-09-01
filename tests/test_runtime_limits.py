@@ -33,6 +33,17 @@ class SingleResponseLLM:
         return self._response
 
 
+class TranscriptRecordingLLM(SingleResponseLLM):
+    """Capture observations that the runtime appends to durable model history."""
+
+    def __init__(self, response: ModelResponse) -> None:
+        super().__init__(response)
+        self.recorded_outputs: list[ToolOutput] = []
+
+    def record_tool_outputs(self, tool_outputs: Sequence[ToolOutput]) -> None:
+        self.recorded_outputs.extend(tool_outputs)
+
+
 class RuntimeBoundaryTests(unittest.TestCase):
     def test_command_timeout_is_reported_without_crashing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -102,7 +113,7 @@ class RuntimeBoundaryTests(unittest.TestCase):
     def test_agent_stops_before_executing_a_call_past_max_steps(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
-            llm = SingleResponseLLM(
+            llm = TranscriptRecordingLLM(
                 ModelResponse(
                     response_id="response-1",
                     text="",
@@ -122,6 +133,8 @@ class RuntimeBoundaryTests(unittest.TestCase):
         self.assertEqual(result.status, TaskStatus.MAX_STEPS_REACHED)
         self.assertEqual(result.steps, 1)
         self.assertEqual(len(result.tool_calls), 1)
+        self.assertEqual([output.call_id for output in llm.recorded_outputs], ["call-1", "call-2"])
+        self.assertIn("maximum tool-call steps", llm.recorded_outputs[-1].output)
 
 
 def _context(

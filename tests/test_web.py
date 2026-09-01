@@ -22,7 +22,7 @@ from agent.config import RuntimeLimits, Settings
 from agent.llm.models import ToolCall
 from agent.security.policy_types import Decision, PolicyDecision
 from agent.security.risk import RiskLevel
-from agent.web.app import create_app
+from agent.web.app import _event_cursor, create_app
 from agent.web.approval import WebApproval
 
 
@@ -58,6 +58,13 @@ class WebApprovalTests(unittest.TestCase):
 
 
 class WebApplicationTests(unittest.TestCase):
+    def test_event_cursor_prefers_a_valid_browser_reconnect_id(self) -> None:
+        """An EventSource reconnect resumes after its last confirmed journal item."""
+
+        self.assertEqual(_event_cursor(3, "8"), 8)
+        self.assertEqual(_event_cursor(8, "3"), 8)
+        self.assertEqual(_event_cursor(3, "not-a-number"), 3)
+
     def test_web_configuration_is_redacted_and_session_api_is_available(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -106,11 +113,13 @@ class WebApplicationTests(unittest.TestCase):
                 with TestClient(create_app(settings, workspace)) as restored_client:
                     listed = restored_client.get("/api/conversations")
                     deleted = restored_client.delete(f"/api/conversations/{conversation_id}")
+                    deleted_again = restored_client.delete(f"/api/conversations/{conversation_id}")
                     missing = restored_client.get(f"/api/conversations/{conversation_id}")
 
         self.assertEqual(listed.status_code, 200)
         self.assertEqual([item["conversation_id"] for item in listed.json()], [conversation_id])
         self.assertEqual(deleted.status_code, 204)
+        self.assertEqual(deleted_again.status_code, 204)
         self.assertEqual(missing.status_code, 404)
 
 

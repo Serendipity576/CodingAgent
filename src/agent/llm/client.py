@@ -136,19 +136,26 @@ class ResponsesClient:
     ) -> list[dict[str, object]]:
         """Start a task or append tool observations to the local transcript."""
 
+        additions = _tool_output_items(tool_outputs)
+        # Callers that do not support immediate durable recording still supply
+        # their completed observations here before history repair runs.
+        if additions and self._history[-len(additions):] != additions:
+            self._history.extend(additions)
+        self._repair_unanswered_tool_calls()
         if task is not None:
             # A non-empty history means a user is continuing the same local
             # conversation after an earlier Agent turn has finished.
             return [*self._history, {"role": "user", "content": task}]
         if not self._history:
             raise LLMRequestError("follow-up model request has no prior task context")
-        additions = _tool_output_items(tool_outputs)
-        # The Agent records each completed tool result immediately for durable
-        # recovery. Do not append the same observations a second time when the
-        # normal next model call receives them as its argument.
-        if additions and self._history[-len(additions):] == additions:
-            return list(self._history)
-        return [*self._history, *additions]
+        return list(self._history)
+
+    def _repair_unanswered_tool_calls(self) -> None:
+        """Close incomplete persisted function calls before a provider validates the request."""
+
+        recovered = _unanswered_tool_output_items(self._history)
+        if recovered:
+            self._history.extend(recovered)
 
     def _provider_request_options(self) -> dict[str, object]:
         """Return optional parameters supported by this endpoint adapter."""
@@ -292,6 +299,35 @@ def _tool_output_items(tool_outputs: Sequence[ToolOutput]) -> list[dict[str, obj
             "output": tool_output.output,
         }
         for tool_output in tool_outputs
+    ]
+
+
+def _unanswered_tool_output_items(history: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    """Create safe observations for legacy transcript calls that have no output item."""
+
+    unanswered: dict[str, None] = {}
+    for item in history:
+        item_type = item.get("type")
+        call_id = item.get("call_id")
+        if not isinstance(call_id, str):
+            continue
+        if item_type == "function_call":
+            unanswered[call_id] = None
+        elif item_type == "function_call_output":
+            unanswered.pop(call_id, None)
+    return [
+        {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": json.dumps(
+                {
+                    "success": False,
+                    "error": "not executed because an earlier agent turn ended before this tool call",
+                },
+                ensure_ascii=False,
+            ),
+        }
+        for call_id in unanswered
     ]
 
 

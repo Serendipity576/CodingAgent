@@ -1,6 +1,12 @@
 // Pure formatting helpers keep event rendering components compact.
 import type { ApprovalRequest, ConversationEvent, ConversationState } from "./types";
 
+export interface TurnOutcome {
+  description: string;
+  tone: "error" | "warning" | "neutral";
+  title: string;
+}
+
 /** Return a short human-facing label for a runtime event. */
 export function eventLabel(event: string): string {
   const labels: Record<string, string> = {
@@ -11,8 +17,8 @@ export function eventLabel(event: string): string {
     tool_requested: "请求调用工具",
     tool_finished: "工具执行完成",
     assistant_message: "Agent 回复",
-    agent_finished: "Agent 已完成",
-    conversation_turn_finished: "本轮任务已结束",
+    agent_finished: "Agent 已结束本轮",
+    conversation_turn_finished: "本轮处理已结束",
     conversation_interrupted: "服务重启后会话已中断",
     approval_required: "等待高风险操作确认",
     approval_resolved: "高风险操作已处理",
@@ -42,6 +48,50 @@ export function stateLabel(state: ConversationState): string {
     limit_reached: "已达上限",
   };
   return labels[state];
+}
+
+/** Describe terminal results that need a visible user decision or follow-up. */
+export function turnOutcome(status: string | null, maxSteps: number): TurnOutcome | null {
+  switch (status) {
+    case "max_steps_reached":
+      return {
+        title: "本轮未完成",
+        description: `已达到 ${maxSteps} 次工具调用上限。发送下一条消息可继续，或提高 max steps。`,
+        tone: "warning",
+      };
+    case "task_timeout":
+      return {
+        title: "本轮未完成",
+        description: "任务达到执行时间上限。请查看记录后发送下一条消息继续，或提高任务超时限制。",
+        tone: "warning",
+      };
+    case "repeated_tool_failure":
+      return {
+        title: "本轮未完成",
+        description: "同一工具连续失败，运行已停止。请查看执行记录并明确下一步操作。",
+        tone: "error",
+      };
+    case "llm_error":
+      return {
+        title: "模型请求失败",
+        description: "本轮未能取得模型响应。请检查本地服务和模型配置后重试。",
+        tone: "error",
+      };
+    case "cancelled":
+      return {
+        title: "本轮已取消",
+        description: "已停止后续模型和工具调用。发送下一条消息即可继续处理。",
+        tone: "neutral",
+      };
+    case "interrupted":
+      return {
+        title: "本轮已中断",
+        description: "服务重启或中断后不会自动重放任务。请发送下一条消息决定是否继续。",
+        tone: "warning",
+      };
+    default:
+      return null;
+  }
 }
 
 /** Convert a safe server event into the approval data needed by the dialog. */

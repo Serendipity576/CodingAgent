@@ -111,6 +111,27 @@ class ConversationTests(unittest.TestCase):
 
         self.assertEqual(session.state, ConversationState.LIMIT_REACHED)
 
+    def test_client_message_id_deduplicates_a_browser_retry(self) -> None:
+        """A lost browser response must not enqueue an equivalent second turn."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            llm = RecordingLLM()
+            with patch("agent.conversation.build_llm_client", return_value=llm):
+                manager = ConversationManager(_settings(workspace), workspace)
+                session = manager.create()
+                self.assertTrue(session.submit("First message.", client_message_id="browser-1"))
+                self.assertTrue(session.submit("Repeated message.", client_message_id="browser-1"))
+                _wait_for_finished_turn(session, 1)
+
+        user_events = [
+            item for item in session.events_after(0, timeout_seconds=0)
+            if item.event == "user_message"
+        ]
+        self.assertEqual([request["task"] for request in llm.requests], ["First message."])
+        self.assertEqual(len(user_events), 1)
+        self.assertEqual(user_events[0].details["client_message_id"], "browser-1")
+
     def test_session_restores_local_history_and_can_be_deleted(self) -> None:
         """Persist one completed turn, resume it in a new manager, then erase it."""
 

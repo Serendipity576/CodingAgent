@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 import json
@@ -160,7 +160,7 @@ class CodingAgent:
                 )
 
             outputs: list[ToolOutput] = []
-            for call in response.tool_calls:
+            for call_index, call in enumerate(response.tool_calls):
                 self._emit(
                     "tool_requested",
                     {
@@ -170,16 +170,28 @@ class CodingAgent:
                     },
                 )
                 if steps >= self._settings.limits.max_steps:
+                    self._record_unexecuted_tool_calls(
+                        response.tool_calls[call_index:],
+                        "not executed because the maximum tool-call steps were reached",
+                    )
                     return finish(
                         TaskStatus.MAX_STEPS_REACHED,
                         "maximum tool-call steps reached",
                     )
                 if self._task_timed_out(started_at):
+                    self._record_unexecuted_tool_calls(
+                        response.tool_calls[call_index:],
+                        "not executed because the task time limit was reached",
+                    )
                     return finish(
                         TaskStatus.TASK_TIMEOUT,
                         "task time limit reached before the next tool call",
                     )
                 if self._is_cancelled():
+                    self._record_unexecuted_tool_calls(
+                        response.tool_calls[call_index:],
+                        "not executed because the task was cancelled",
+                    )
                     return finish(TaskStatus.CANCELLED, "task cancelled before tool execution")
 
                 steps += 1
@@ -236,6 +248,37 @@ class CodingAgent:
                     )
 
             pending_outputs = tuple(outputs)
+
+    def _record_unexecuted_tool_calls(
+        self,
+        calls: Sequence[ToolCall],
+        reason: str,
+    ) -> None:
+        """Close skipped model calls so durable history remains valid for a later turn."""
+
+        outputs = tuple(
+            ToolOutput(
+                call_id=call.call_id,
+                output=json.dumps({"success": False, "error": reason}, ensure_ascii=False),
+            )
+            for call in calls
+        )
+        _record_tool_outputs(self._llm, outputs)
+        for call, output in zip(calls, outputs):
+            self._emit(
+                "tool_finished",
+                {
+                    "call_id": call.call_id,
+                    "tool": call.name,
+                    "success": False,
+                    "error": reason,
+                    "decision": "not_executed",
+                    "risk": "none",
+                    "policy": "runtime_limit",
+                    "duration_ms": 0,
+                    "output_chars": len(output.output),
+                },
+            )
 
     def _task_timed_out(self, started_at: float) -> bool:
         return monotonic() - started_at >= self._settings.limits.max_task_seconds

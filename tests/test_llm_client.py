@@ -292,6 +292,36 @@ class ResponsesClientTests(unittest.TestCase):
             ],
         )
 
+    def test_restored_history_repairs_an_unanswered_function_call_before_follow_up(self) -> None:
+        recorder = RecordingResponses(
+            {"id": "response-2", "output_text": "Recovered.", "output": []}
+        )
+        client = _recording_client(ResponsesClient, recorder)
+        client.restore_history(
+            [
+                {"role": "user", "content": "Inspect the project."},
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "read_file",
+                    "arguments": '{"path":"README.md"}',
+                },
+            ]
+        )
+
+        client.respond(
+            instructions="Use tools.",
+            task="Continue safely.",
+            tools=(),
+            tool_outputs=(),
+        )
+
+        input_items = recorder.requests[0]["input"]
+        self.assertEqual(input_items[2]["type"], "function_call_output")
+        self.assertEqual(input_items[2]["call_id"], "call-1")
+        self.assertIn("earlier agent turn ended", input_items[2]["output"])
+        self.assertEqual(input_items[3], {"role": "user", "content": "Continue safely."})
+
     def test_explicit_provider_selects_the_matching_internal_adapter(self) -> None:
         self.assertIs(
             _client_class_for_provider("openai"),

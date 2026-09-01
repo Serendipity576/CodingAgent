@@ -116,10 +116,9 @@ def create_app(settings: Settings, workspace: Path) -> FastAPI:
 
     @app.delete("/api/conversations/{conversation_id}", status_code=204)
     async def delete_conversation(conversation_id: str) -> Response:
-        """Permanently erase one local transcript and its browser event journal."""
+        """Idempotently erase one local transcript and its browser event journal."""
 
-        if not manager.delete(conversation_id):
-            raise HTTPException(status_code=404, detail="conversation not found")
+        manager.delete(conversation_id)
         return Response(status_code=204)
 
     @app.get("/api/conversations/{conversation_id}/events")
