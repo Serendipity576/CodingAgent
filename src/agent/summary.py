@@ -59,7 +59,6 @@ def build_task_summary(
         if call.name == "apply_patch" and result.success:
             _record_file_change(result, modified_files, diff_summaries)
         elif call.name == "run_command" and _is_test_command(call):
-            # The latest test command reflects the state after the latest patch.
             tests = "passed" if result.success else "failed"
 
     return TaskSummary(

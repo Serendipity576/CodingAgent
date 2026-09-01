@@ -114,6 +114,25 @@ def create_app(settings: Settings, workspace: Path) -> FastAPI:
             raise HTTPException(status_code=404, detail="approval is not pending")
         return {"accepted": True}
 
+    @app.get("/api/conversations/{conversation_id}/traces")
+    async def turn_traces(conversation_id: str) -> list[dict[str, object]]:
+        """Return trace structure only; request and response bodies stay private by default."""
+
+        return _session_or_404(manager, conversation_id).turn_traces()
+
+    @app.get("/api/conversations/{conversation_id}/traces/{turn_id}/items/{item_id}")
+    async def turn_trace_item(
+        conversation_id: str,
+        turn_id: int,
+        item_id: str,
+    ) -> dict[str, object]:
+        """Return one user-opened local model or tool detail record."""
+
+        item = _session_or_404(manager, conversation_id).turn_trace_item(turn_id, item_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="trace item not found")
+        return item
+
     @app.delete("/api/conversations/{conversation_id}", status_code=204)
     async def delete_conversation(conversation_id: str) -> Response:
         """Idempotently erase one local transcript and its browser event journal."""

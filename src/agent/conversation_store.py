@@ -27,6 +27,14 @@ class StoredEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class StoredTurnTrace:
+    """One private structured runtime trace associated with a completed or active turn."""
+
+    turn_id: int
+    data: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
 class StoredConversation:
     """Complete local state required to restore one durable conversation."""
 
@@ -39,6 +47,7 @@ class StoredConversation:
     transcript: tuple[dict[str, object], ...]
     latest_result: Mapping[str, object] | None
     events: tuple[StoredEvent, ...]
+    turn_traces: tuple[StoredTurnTrace, ...]
 
 
 class ConversationStore:
@@ -78,6 +87,15 @@ class ConversationStore:
                 );
                 CREATE INDEX IF NOT EXISTS conversation_updated_at
                     ON conversations(updated_at DESC);
+                CREATE TABLE IF NOT EXISTS conversation_turn_traces (
+                    conversation_id TEXT NOT NULL,
+                    turn_id INTEGER NOT NULL,
+                    data_json TEXT NOT NULL,
+                    PRIMARY KEY (conversation_id, turn_id),
+                    FOREIGN KEY (conversation_id)
+                        REFERENCES conversations(conversation_id)
+                        ON DELETE CASCADE
+                );
                 """
             )
 
@@ -158,6 +176,32 @@ class ConversationStore:
                 (time(), conversation_id),
             )
 
+    def save_turn_trace(
+        self,
+        conversation_id: str,
+        *,
+        turn_id: int,
+        data: Mapping[str, object],
+    ) -> None:
+        """Upsert a bounded private trace without placing its bodies in the event journal."""
+
+        if turn_id <= 0:
+            raise ConversationStoreError("turn id must be positive")
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO conversation_turn_traces (conversation_id, turn_id, data_json)
+                VALUES (?, ?, ?)
+                ON CONFLICT(conversation_id, turn_id) DO UPDATE SET
+                    data_json = excluded.data_json
+                """,
+                (conversation_id, turn_id, _json_text(dict(data))),
+            )
+            connection.execute(
+                "UPDATE conversations SET updated_at = ? WHERE conversation_id = ?",
+                (time(), conversation_id),
+            )
+
     def load_conversations(self) -> tuple[StoredConversation, ...]:
         """Load all sessions and their safe event journals in recent-first order."""
 
@@ -177,6 +221,13 @@ class ConversationStore:
                 ORDER BY conversation_id, sequence
                 """
             ).fetchall()
+            turn_traces = connection.execute(
+                """
+                SELECT conversation_id, turn_id, data_json
+                FROM conversation_turn_traces
+                ORDER BY conversation_id, turn_id
+                """
+            ).fetchall()
 
         events_by_conversation: dict[str, list[StoredEvent]] = {}
         for row in events:
@@ -187,6 +238,16 @@ class ConversationStore:
                     event=_required_text(row["event"], "event name"),
                     timestamp=_required_float(row["timestamp"], "event timestamp"),
                     details=_mapping_json(row["details_json"], "event details"),
+                )
+            )
+
+        traces_by_conversation: dict[str, list[StoredTurnTrace]] = {}
+        for row in turn_traces:
+            conversation_id = _required_text(row["conversation_id"], "conversation id")
+            traces_by_conversation.setdefault(conversation_id, []).append(
+                StoredTurnTrace(
+                    turn_id=_required_positive_int(row["turn_id"], "turn id"),
+                    data=_mapping_json(row["data_json"], "turn trace"),
                 )
             )
 
@@ -203,6 +264,7 @@ class ConversationStore:
                 transcript=_transcript_json(row["transcript_json"]),
                 latest_result=_optional_mapping_json(row["latest_result_json"], "latest result"),
                 events=tuple(events_by_conversation.get(str(row["conversation_id"]), ())),
+                turn_traces=tuple(traces_by_conversation.get(str(row["conversation_id"]), ())),
             )
             for row in rows
         )

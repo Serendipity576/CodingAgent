@@ -32,6 +32,41 @@ export interface ConversationSnapshot {
   summary: TaskSummary | null;
 }
 
+export type TraceKind = "model" | "tool";
+export type TraceStatus = "running" | "completed" | "failed" | "skipped" | string;
+
+/** One list-safe item; request and response bodies require a separate local read. */
+export interface TraceItem {
+  item_id: string;
+  parent_id: string | null;
+  kind: TraceKind;
+  status: TraceStatus;
+  title: string;
+  summary: string;
+  started_at: number;
+  finished_at: number | null;
+  duration_ms: number | null;
+  attributes: Record<string, unknown>;
+}
+
+/** A persisted runtime trace for one Agent turn. */
+export interface TurnTrace {
+  conversation_id: string;
+  turn_id: number;
+  status: string;
+  started_at: number;
+  finished_at: number | null;
+  duration_ms: number | null;
+  summary: { message?: string; steps?: number } | null;
+  items: TraceItem[];
+}
+
+/** One deliberately opened trace item including its sanitized request/response bodies. */
+export interface TraceItemDetail extends TraceItem {
+  request?: unknown;
+  response?: unknown;
+}
+
 export type ConversationState = "idle" | "running" | "interrupted" | "closed" | "limit_reached";
 
 export interface ConversationEvent {

@@ -4,7 +4,7 @@ A coding agent with workspace-bounded local tools, deterministic policy checks, 
 
 ## Current status
 
-P4 (security tests and demonstration) is complete. P6 (persistent conversations and the local Web interface) is implemented and covered by automated tests; a final real-browser acceptance run remains pending. The Agent gates every tool call through a deterministic policy, constrains filesystem access to the workspace, protects common credential paths, records structured audit events, and includes a reproducible prompt-injection demonstration.
+P4 (security tests and demonstration) and P6 (persistent conversations and the local Web interface) are complete. The Agent gates every tool call through a deterministic policy, constrains filesystem access to the workspace, protects common credential paths, records structured audit events, and includes a reproducible prompt-injection demonstration.
 
 ## Quick start
 
@@ -102,9 +102,9 @@ In Web mode, `REQUIRE_APPROVAL` pauses the worker and shows one browser prompt c
 
 Each task writes append-only JSONL events to `.agent/logs/<task-id>.jsonl`. Events record the task, tool name, policy decision, risk, duration, exit metadata, and the final outcome. File bodies, patch text, and tool output are intentionally excluded from the audit log.
 
-The final CLI JSON includes a task summary: changed-file count and paths from successful `apply_patch` calls, per-file added/removed-line counts, the latest recognized test result, blocked actions, and approved high-risk actions. When a task begins, the CLI also captures the read-only `git status --porcelain` baseline. Existing Git changes are reported separately and are never counted as Agent changes.
+The final CLI JSON includes a task summary: changed-file count and paths from successful `apply_patch` calls, per-file added/removed-line counts, the latest recognized test result, blocked actions, and approved high-risk actions.
 
-Automatic rollback is not implemented. The Agent never claims it can restore user changes that existed before a task began.
+Web conversations additionally keep a private, per-turn runtime trace in the local session database. It groups model exchanges and their tool calls, including duration, policy decision, completion state, and terminal result. The normal trace list and SSE updates never contain model request/response bodies. Opening one trace item in the local Web page requests its sanitized request or response on demand; API keys, authentication headers, common credential fields, and common secret patterns are redacted, oversized text is marked as truncated, and encrypted model reasoning is not recorded.
 
 ## Security verification and demo
 

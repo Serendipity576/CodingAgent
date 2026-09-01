@@ -16,6 +16,7 @@ from agent.context import TaskContext
 from agent.llm.client import LLMClient, LLMRequestError
 from agent.llm.models import ToolCall, ToolOutput
 from agent.summary import TaskSummary, build_task_summary
+from agent.trace import TurnTraceRecorder
 from agent.tools.base import ToolContext, ToolResult
 from agent.tools.registry import ToolRegistry
 
@@ -69,6 +70,7 @@ class CodingAgent:
         git_baseline: GitStatusSnapshot | None = None,
         event_callback: Callable[[str, Mapping[str, object]], None] | None = None,
         cancellation: object | None = None,
+        trace: TurnTraceRecorder | None = None,
     ) -> None:
         self._settings = settings
         self._llm = llm
@@ -77,6 +79,7 @@ class CodingAgent:
         self._git_baseline = git_baseline
         self._event_callback = event_callback
         self._cancellation = cancellation
+        self._trace = trace
 
     def run(self, task: str) -> TaskResult:
         """Run one task until the model finishes or a deterministic limit stops it."""
@@ -125,6 +128,8 @@ class CodingAgent:
                     steps=steps,
                     summary=summary,
                 )
+            if self._trace is not None:
+                self._trace.finish(status=status.value, message=message, steps=steps)
             self._emit(
                 "agent_finished",
                 {"status": status.value, "message": message, "steps": steps},
@@ -140,6 +145,20 @@ class CodingAgent:
             if self._is_cancelled():
                 return finish(TaskStatus.CANCELLED, "task cancelled before the next model turn")
 
+            model_started_at = monotonic()
+            model_trace_id = (
+                self._trace.model_started(
+                    step=steps + 1,
+                    request=_model_request_trace(
+                        instructions=task_context.instructions,
+                        task=next_task,
+                        tools=self._tools.schemas(),
+                        tool_outputs=pending_outputs,
+                    ),
+                )
+                if self._trace is not None
+                else None
+            )
             try:
                 self._emit("llm_request_started", {"step": steps + 1})
                 response = self._llm.respond(
@@ -149,7 +168,20 @@ class CodingAgent:
                     tool_outputs=pending_outputs,
                 )
             except LLMRequestError as error:
+                if self._trace is not None and model_trace_id is not None:
+                    self._trace.model_failed(
+                        model_trace_id,
+                        error=str(error),
+                        duration_ms=int((monotonic() - model_started_at) * 1000),
+                    )
                 return finish(TaskStatus.LLM_ERROR, str(error))
+
+            if self._trace is not None and model_trace_id is not None:
+                self._trace.model_finished(
+                    model_trace_id,
+                    response=_model_response_trace(response),
+                    duration_ms=int((monotonic() - model_started_at) * 1000),
+                )
 
             next_task = None
             if not response.tool_calls:
@@ -173,6 +205,7 @@ class CodingAgent:
                     self._record_unexecuted_tool_calls(
                         response.tool_calls[call_index:],
                         "not executed because the maximum tool-call steps were reached",
+                        parent_id=model_trace_id,
                     )
                     return finish(
                         TaskStatus.MAX_STEPS_REACHED,
@@ -182,6 +215,7 @@ class CodingAgent:
                     self._record_unexecuted_tool_calls(
                         response.tool_calls[call_index:],
                         "not executed because the task time limit was reached",
+                        parent_id=model_trace_id,
                     )
                     return finish(
                         TaskStatus.TASK_TIMEOUT,
@@ -191,13 +225,25 @@ class CodingAgent:
                     self._record_unexecuted_tool_calls(
                         response.tool_calls[call_index:],
                         "not executed because the task was cancelled",
+                        parent_id=model_trace_id,
                     )
                     return finish(TaskStatus.CANCELLED, "task cancelled before tool execution")
 
                 steps += 1
+                tool_trace_id = (
+                    self._trace.tool_started(
+                        step=steps,
+                        parent_id=model_trace_id,
+                        call=call,
+                    )
+                    if self._trace is not None
+                    else None
+                )
                 tool_started_at = monotonic()
                 result = self._tools.execute(call, tool_context)
                 duration_ms = int((monotonic() - tool_started_at) * 1000)
+                if self._trace is not None and tool_trace_id is not None:
+                    self._trace.tool_finished(tool_trace_id, result=result, duration_ms=duration_ms)
                 executed.append(ExecutedToolCall(call=call, result=result))
                 if audit_logger is not None:
                     audit_logger.tool_executed(
@@ -253,6 +299,8 @@ class CodingAgent:
         self,
         calls: Sequence[ToolCall],
         reason: str,
+        *,
+        parent_id: str | None,
     ) -> None:
         """Close skipped model calls so durable history remains valid for a later turn."""
 
@@ -265,6 +313,13 @@ class CodingAgent:
         )
         _record_tool_outputs(self._llm, outputs)
         for call, output in zip(calls, outputs):
+            if self._trace is not None:
+                item_id = self._trace.tool_started(
+                    step=0,
+                    parent_id=parent_id,
+                    call=call,
+                )
+                self._trace.tool_skipped(item_id, reason=reason)
             self._emit(
                 "tool_finished",
                 {
@@ -351,3 +406,54 @@ def _text_length(value: object) -> int | None:
     """Report a text length without copying its content into an event stream."""
 
     return len(value) if isinstance(value, str) else None
+
+
+def _model_request_trace(
+    *,
+    instructions: str,
+    task: str | None,
+    tools: Sequence[Mapping[str, object]],
+    tool_outputs: Sequence[ToolOutput],
+) -> dict[str, object]:
+    """Provide a generic fallback before an adapter records its exact request body."""
+
+    return {
+        "instructions": instructions,
+        "task": task,
+        "tools": list(tools),
+        "tool_outputs": [
+            {"call_id": output.call_id, "output": output.output}
+            for output in tool_outputs
+        ],
+    }
+
+
+def _model_response_trace(response: object) -> dict[str, object]:
+    """Normalize a response for trace clients that do not expose provider payloads."""
+
+    response_id = getattr(response, "response_id", None)
+    text = getattr(response, "text", None)
+    tool_calls = getattr(response, "tool_calls", ())
+    usage = getattr(response, "usage", None)
+    return {
+        "response_id": response_id,
+        "output_text": text,
+        "tool_calls": [
+            {
+                "call_id": call.call_id,
+                "name": call.name,
+                "arguments": dict(call.arguments or {}),
+                "arguments_error": call.arguments_error,
+            }
+            for call in tool_calls
+        ],
+        "usage": (
+            {
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "total_tokens": usage.total_tokens,
+            }
+            if usage is not None
+            else None
+        ),
+    }

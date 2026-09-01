@@ -36,13 +36,14 @@ class ListFilesTool:
     """List a bounded directory tree without following symlinked directories."""
 
     name = "list_files"
-    description = "List files and directories under a workspace-relative path."
+    description = "List files and directories under a workspace-relative path. Use '.' for the workspace root."
     parameters: Mapping[str, object] = {
         "type": "object",
         "properties": {
             "path": {
                 "type": "string",
-                "description": "Directory to inspect, relative to the workspace.",
+                "description": "Directory to inspect, relative to the workspace. Use '.' for the workspace root.",
+                "default": ".",
             },
             "max_depth": {
                 "type": "integer",
@@ -51,14 +52,16 @@ class ListFilesTool:
                 "maximum": 5,
             },
         },
-        "required": ["path"],
         "additionalProperties": False,
     }
 
     def execute(
         self, arguments: Mapping[str, object], context: ToolContext
     ) -> ToolResult:
-        target = resolve_workspace_path(context, _required_string(arguments, "path"))
+        requested_path = arguments.get("path", ".")
+        if isinstance(requested_path, str) and not requested_path.strip():
+            requested_path = "."
+        target = resolve_workspace_path(context, requested_path)
         if not target.exists():
             raise ToolError(f"directory does not exist: {target}")
         if not target.is_dir():
@@ -205,6 +208,7 @@ class ApplyPatchTool:
             else:
                 if expected_text:
                     raise ToolError("expected_text must be empty when creating a file")
+                original = None
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(replacement_text, encoding="utf-8")
                 action = "created"

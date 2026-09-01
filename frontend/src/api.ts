@@ -1,5 +1,5 @@
 // The frontend calls only same-origin, safe local conversation endpoints.
-import type { ConversationSnapshot, PublicConfig } from "./types";
+import type { ConversationSnapshot, PublicConfig, TraceItemDetail, TurnTrace } from "./types";
 
 /** Raised when a local API request returns a non-successful HTTP response. */
 export class ApiError extends Error {
@@ -49,5 +49,11 @@ export const api = {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ approved }),
       },
+    ),
+  traces: (conversationId: string) =>
+    request<TurnTrace[]>(`/api/conversations/${conversationId}/traces`),
+  traceItem: (conversationId: string, turnId: number, itemId: string) =>
+    request<TraceItemDetail>(
+      `/api/conversations/${conversationId}/traces/${turnId}/items/${encodeURIComponent(itemId)}`,
     ),
 };

@@ -7,7 +7,7 @@ provider-side conversation or a previous response identifier.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import json
 from typing import Protocol
 
@@ -53,7 +53,12 @@ class TranscriptClient(Protocol):
 class ResponsesClient:
     """Call a Responses-compatible endpoint using only shared request fields."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        trace_callback: Callable[[str, Mapping[str, object]], None] | None = None,
+    ) -> None:
         if not settings.api_key or not settings.base_url or not settings.model:
             raise LLMConfigurationError(
                 "CODING_AGENT_API_KEY, CODING_AGENT_BASE_URL, and CODING_AGENT_MODEL "
@@ -70,6 +75,7 @@ class ResponsesClient:
         self._client = OpenAI(api_key=settings.api_key, base_url=settings.base_url)
         self._model = settings.model
         self._max_output_tokens = settings.max_output_tokens
+        self._trace_callback = trace_callback
         # This is the sole conversation state.  It contains the user's task,
         # every provider output item, and each subsequent tool observation.
         self._history: list[dict[str, object]] = []
@@ -97,16 +103,22 @@ class ResponsesClient:
         if self._max_output_tokens is not None:
             request["max_output_tokens"] = self._max_output_tokens
         request.update(self._provider_request_options())
+        self._emit_trace("request", {"request": _json_mapping_copy(request)})
 
         try:
             response = self._client.responses.create(**request)
         except Exception as error:  # SDK exceptions vary by installed version.
+            self._emit_trace("error", {"error": f"model request failed: {error}"})
             raise LLMRequestError(f"model request failed: {error}") from error
 
         model_response = _parse_response(response)
         # Preserve every output item, including reasoning data required by a
         # provider to continue safely on the next independently sent request.
         self._history = [*input_items, *_response_input_items(response)]
+        self._emit_trace(
+            "response",
+            {"response": _trace_response(response, model_response)},
+        )
         return model_response
 
     def export_history(self) -> list[dict[str, object]]:
@@ -162,6 +174,18 @@ class ResponsesClient:
 
         return {}
 
+    def _emit_trace(self, event: str, details: Mapping[str, object]) -> None:
+        """Report one local diagnostic fact without coupling provider calls to storage."""
+
+        callback = getattr(self, "_trace_callback", None)
+        if callback is None:
+            return
+        try:
+            callback(event, details)
+        except Exception:
+            # Trace persistence must never make a provider request fail.
+            return
+
 
 class OpenAIResponsesClient(ResponsesClient):
     """Use OpenAI-only controls while keeping the transcript local."""
@@ -184,10 +208,14 @@ class DeepSeekResponsesClient(ResponsesClient):
     """DeepSeek adapter that deliberately omits OpenAI-only request options."""
 
 
-def build_llm_client(settings: Settings) -> LLMClient:
+def build_llm_client(
+    settings: Settings,
+    *,
+    trace_callback: Callable[[str, Mapping[str, object]], None] | None = None,
+) -> LLMClient:
     """Create the explicitly configured endpoint adapter."""
 
-    return _client_class_for_provider(settings.provider)(settings)
+    return _client_class_for_provider(settings.provider)(settings, trace_callback=trace_callback)
 
 
 def _client_class_for_provider(provider: str | None) -> type[ResponsesClient]:
@@ -202,6 +230,49 @@ def _client_class_for_provider(provider: str | None) -> type[ResponsesClient]:
     raise LLMConfigurationError(
         "CODING_AGENT_PROVIDER must be set to openai, deepseek, or responses"
     )
+
+
+def _trace_response(response: object, model_response: ModelResponse) -> dict[str, object]:
+    """Build a provider-neutral response view without recording encrypted reasoning."""
+
+    usage = model_response.usage
+    return {
+        "response_id": model_response.response_id,
+        "output_text": model_response.text,
+        "output": _trace_output_items(response),
+        "usage": (
+            {
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "total_tokens": usage.total_tokens,
+            }
+            if usage is not None
+            else None
+        ),
+    }
+
+
+def _trace_output_items(response: object) -> list[dict[str, object]]:
+    """Serialize visible provider output while omitting replay-only reasoning secrets."""
+
+    items: list[dict[str, object]] = []
+    for item in _response_input_items(response):
+        visible = dict(item)
+        visible.pop("encrypted_content", None)
+        items.append(visible)
+    return items
+
+
+def _json_mapping_copy(value: Mapping[str, object]) -> dict[str, object]:
+    """Copy a request before an SDK can mutate nested values during serialization."""
+
+    try:
+        copied = json.loads(json.dumps(value, ensure_ascii=False))
+    except (TypeError, ValueError) as error:
+        raise LLMRequestError("model request is not JSON serializable") from error
+    if not isinstance(copied, dict):
+        raise LLMRequestError("model request must be a JSON object")
+    return copied
 
 
 def _parse_response(response: object) -> ModelResponse:

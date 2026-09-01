@@ -20,6 +20,8 @@ import type {
   ConversationEvent,
   ConversationSnapshot,
   PublicConfig,
+  TraceItemDetail,
+  TurnTrace,
 } from "./types";
 
 const SSE_EVENT_NAMES = [
@@ -33,6 +35,7 @@ const SSE_EVENT_NAMES = [
   "assistant_message",
   "agent_finished",
   "conversation_turn_finished",
+  "trace_updated",
   "conversation_interrupted",
   "approval_required",
   "approval_resolved",
@@ -98,6 +101,7 @@ export default function App() {
   const [sessions, setSessions] = useState<ConversationSnapshot[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [eventsBySession, setEventsBySession] = useState<Record<string, ConversationEvent[]>>({});
+  const [tracesBySession, setTracesBySession] = useState<Record<string, TurnTrace[]>>({});
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [pendingMessages, setPendingMessages] = useState<PendingMessage[]>([]);
   const [unreadSessions, setUnreadSessions] = useState<Record<string, true>>({});
@@ -124,6 +128,7 @@ export default function App() {
 
   const activeSession = sessions.find((session) => session.conversation_id === activeId) ?? null;
   const activeEvents = activeId ? eventsBySession[activeId] ?? [] : [];
+  const activeTraces = activeId ? tracesBySession[activeId] ?? [] : [];
   const activePendingMessages = activeId ? pendingMessages.filter((message) => message.conversationId === activeId) : [];
   const activeApproval = activeId ? approvals[activeId] ?? null : null;
   const message = activeId ? drafts[activeId] ?? "" : "";
@@ -140,6 +145,15 @@ export default function App() {
       }
       return previous.map((item) => item.conversation_id === snapshot.conversation_id ? snapshot : item);
     });
+  }, []);
+
+  /** Retrieve list-safe runtime trace structure for one local conversation. */
+  const refreshTraces = useCallback(async (conversationId: string): Promise<TurnTrace[]> => {
+    const traces = await api.traces(conversationId);
+    if (!deletedConversationIds.current.has(conversationId)) {
+      setTracesBySession((previous) => ({ ...previous, [conversationId]: traces }));
+    }
+    return traces;
   }, []);
 
   /** Refresh metadata only; history and provider internals never reach the browser. */
@@ -237,6 +251,7 @@ export default function App() {
       }
       sequences.current.delete(conversationId);
       setEventsBySession((previous) => removeConversationEntry(previous, conversationId));
+      setTracesBySession((previous) => removeConversationEntry(previous, conversationId));
       setApprovals((previous) => removeConversationEntry(previous, conversationId));
       setDrafts((previous) => removeConversationEntry(previous, conversationId));
       setUnreadSessions((previous) => removeConversationEntry(previous, conversationId));
@@ -340,6 +355,9 @@ export default function App() {
       if (shouldRefreshSnapshot(event.event)) {
         void api.conversation(conversationId).then(updateSession).catch(() => undefined);
       }
+      if (event.event === "trace_updated") {
+        void refreshTraces(conversationId).catch(() => undefined);
+      }
     };
     for (const name of SSE_EVENT_NAMES) {
       source.addEventListener(name, receive);
@@ -360,7 +378,14 @@ export default function App() {
       source.close();
       connectedStreams.current.delete(conversationId);
     };
-  }, [activeId, appendEvent, updateSession]);
+  }, [activeId, appendEvent, refreshTraces, updateSession]);
+
+  /** Load the active trace on selection and after a browser refresh. */
+  useEffect(() => {
+    if (activeId && !deletedConversationIds.current.has(activeId)) {
+      void refreshTraces(activeId).catch(() => undefined);
+    }
+  }, [activeId, refreshTraces]);
 
   /** Refresh inactive session metadata without holding a long-lived connection for each one. */
   useEffect(() => {
@@ -526,6 +551,26 @@ export default function App() {
     }
   };
 
+  /** Refresh before opening so the dialog always starts with the newest trace structure. */
+  const openActivityDialog = useCallback(async () => {
+    if (activeId) {
+      try {
+        await refreshTraces(activeId);
+      } catch (error) {
+        setNotice(messageFromError(error, "无法读取运行追踪"));
+      }
+    }
+    setActivityDialogOpen(true);
+  }, [activeId, refreshTraces]);
+
+  /** Fetch one explicit local payload only after the reader selects its trace node. */
+  const loadTraceItem = useCallback((turnId: number, itemId: string): Promise<TraceItemDetail> => {
+    if (!activeId) {
+      return Promise.reject(new Error("未选择会话"));
+    }
+    return api.traceItem(activeId, turnId, itemId);
+  }, [activeId]);
+
   const composerDisabled = !activeSession || ["closed", "limit_reached"].includes(activeSession.state);
   return (
     <main className={`app-shell ${inspectorOpen ? "inspector-open" : "inspector-closed"}`}>
@@ -603,7 +648,7 @@ export default function App() {
         <ActivityStatus events={activeEvents} session={activeSession} />
         <TurnOutcomeNotice
           maxSteps={config?.limits.max_steps ?? 20}
-          onOpenActivity={() => setActivityDialogOpen(true)}
+          onOpenActivity={() => void openActivityDialog()}
           session={activeSession}
         />
         <Composer
@@ -619,14 +664,19 @@ export default function App() {
         cancelling={cancelling}
         config={config}
         connection={connection}
-        events={activeEvents}
         onCancel={() => void cancel()}
-        onOpenActivity={() => setActivityDialogOpen(true)}
+        onOpenActivity={() => void openActivityDialog()}
         open={inspectorOpen}
         session={activeSession}
+        traces={activeTraces}
       />
       <ApprovalDialog approval={activeApproval} onResolve={(approved) => void resolveApproval(approved)} resolving={resolvingApproval} />
-      <ActivityDialog events={activeEvents} open={activityDialogOpen} onClose={() => setActivityDialogOpen(false)} />
+      <ActivityDialog
+        onClose={() => setActivityDialogOpen(false)}
+        onLoadItem={loadTraceItem}
+        open={activityDialogOpen}
+        traces={activeTraces}
+      />
     </main>
   );
 }

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -21,6 +22,7 @@ from agent.llm.client import LLMClient, build_llm_client
 from agent.security.approval import ApprovalHandler
 from agent.tools import build_default_registry
 from agent.tools.registry import ToolRegistry
+from agent.trace import TurnTraceRecorder, public_turn_trace, trace_item_detail
 
 
 class ConversationState(str, Enum):
@@ -99,11 +101,13 @@ class ConversationSession:
         self._turn_count = 0
         self._latest_result: TaskResult | None = None
         self._latest_result_data: dict[str, object] | None = None
+        self._turn_traces: dict[int, dict[str, object]] = {}
+        self._active_trace: TurnTraceRecorder | None = None
         self._deleted = False
-        self._llm: LLMClient = build_llm_client(settings)
-        # A session captures one baseline, so Agent edits in an earlier turn do
-        # not become falsely labelled as user changes in a later turn.
-        self._git_baseline = GitStatusSnapshot.capture(self.workspace)
+        self._llm: LLMClient = build_llm_client(
+            settings,
+            trace_callback=self._record_llm_trace,
+        )
         approval = approval_factory(self.publish) if approval_factory else None
         self._approval = approval
         self._tools: ToolRegistry = build_default_registry(self.workspace, approval=approval)
@@ -258,6 +262,22 @@ class ConversationSession:
         with self._events_ready:
             return len(self._events)
 
+    def turn_traces(self) -> list[dict[str, object]]:
+        """Return all turn traces without private request or response bodies."""
+
+        with self._lock:
+            return [
+                public_turn_trace(self._turn_traces[turn_id])
+                for turn_id in sorted(self._turn_traces)
+            ]
+
+    def turn_trace_item(self, turn_id: int, item_id: str) -> dict[str, object] | None:
+        """Return one explicitly requested local trace detail record."""
+
+        with self._lock:
+            trace = self._turn_traces.get(turn_id)
+            return trace_item_detail(trace, item_id) if trace is not None else None
+
     def snapshot(self) -> dict[str, object]:
         """Return a compact session view without exposing the local LLM transcript."""
 
@@ -302,6 +322,9 @@ class ConversationSession:
         self._max_turns = restored.max_turns
         self._max_history_items = restored.max_history_items
         self._latest_result_data = dict(restored.latest_result) if restored.latest_result else None
+        self._turn_traces = {
+            item.turn_id: deepcopy(dict(item.data)) for item in restored.turn_traces
+        }
         self._state = _stored_state(restored.state)
         _restore_history(self._llm, restored.transcript)
 
@@ -337,6 +360,14 @@ class ConversationSession:
 
             self.publish("conversation_turn_started", {"turn_id": turn_id})
             with self._execution_lock:
+                trace = TurnTraceRecorder(
+                    conversation_id=self.id,
+                    turn_id=turn_id,
+                    on_change=self._save_turn_trace,
+                )
+                with self._lock:
+                    self._active_trace = trace
+                turn_git_baseline = GitStatusSnapshot.capture(self.workspace)
                 logger = AuditLogger.create(
                     self.workspace,
                     task_id=f"{self.id}-{turn_id}",
@@ -348,11 +379,14 @@ class ConversationSession:
                     llm=self._llm,
                     tools=self._tools,
                     audit_logger=logger,
-                    git_baseline=self._git_baseline,
+                    git_baseline=turn_git_baseline,
                     event_callback=self.publish,
                     cancellation=self._cancel_event,
+                    trace=trace,
                 )
                 result = agent.run(message)
+                with self._lock:
+                    self._active_trace = None
 
             with self._lock:
                 if self._deleted:
@@ -375,6 +409,34 @@ class ConversationSession:
                     "audit_log": str(result.audit_log) if result.audit_log else None,
                 },
             )
+
+    def _record_llm_trace(self, event: str, details: Mapping[str, object]) -> None:
+        """Attach exact adapter payloads to the active turn without sending them to SSE."""
+
+        with self._lock:
+            trace = self._active_trace
+        if trace is not None:
+            trace.record_llm_payload(event, details)
+
+    def _save_turn_trace(self, trace: dict[str, object]) -> None:
+        """Persist trace updates locally and emit only a compact refresh signal."""
+
+        turn_id = trace.get("turn_id")
+        if not isinstance(turn_id, int) or turn_id <= 0:
+            return
+        with self._lock:
+            if self._deleted:
+                return
+            self._turn_traces[turn_id] = deepcopy(trace)
+            self._store.save_turn_trace(self.id, turn_id=turn_id, data=trace)
+        self.publish(
+            "trace_updated",
+            {
+                "turn_id": turn_id,
+                "status": trace.get("status"),
+                "item_count": len(trace.get("items", ())),
+            },
+        )
 
     def _persist(self) -> None:
         """Save a consistent metadata/transcript snapshot unless deletion won the race."""

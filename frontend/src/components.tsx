@@ -17,6 +17,9 @@ import type {
   ConversationSnapshot,
   PublicConfig,
   TaskSummary,
+  TraceItem,
+  TraceItemDetail,
+  TurnTrace,
 } from "./types";
 
 type IconName = "add" | "arrow" | "close" | "code" | "delete" | "history" | "menu" | "panel" | "pause" | "send";
@@ -387,20 +390,21 @@ function saveDismissedOutcomes(outcomes: string[]) {
   }
 }
 
-/** Keep a compact operational summary in the secondary inspector. */
-function ActivityLog({ events, onOpen }: { events: ConversationEvent[]; onOpen: () => void }) {
-  const activityEvents = executionEvents(events).slice(-8).reverse();
+/** Keep a compact, grouped trace summary in the secondary inspector. */
+function ActivityLog({ traces, onOpen }: { traces: TurnTrace[]; onOpen: () => void }) {
+  const latestTrace = traces.at(-1);
+  const items = latestTrace?.items.slice(-4).reverse() ?? [];
   return (
     <section className="activity-log">
       <div className="activity-log-heading">
-        <h3>执行记录</h3>
+        <h3>运行追踪</h3>
         <button aria-haspopup="dialog" className="activity-log-open" type="button" onClick={onOpen}>展开记录</button>
       </div>
-      {activityEvents.length === 0 ? (
-        <p className="activity-log-empty">本轮开始后，工具调用和状态变化会显示在这里。</p>
+      {items.length === 0 ? (
+        <p className="activity-log-empty">模型调用、工具执行和安全决策会按轮次显示在这里。</p>
       ) : (
         <div className="activity-list">
-          {activityEvents.map((event) => <ActivityEntry event={event} key={event.sequence} />)}
+          {items.map((item) => <TraceEntry item={item} key={item.item_id} />)}
         </div>
       )}
     </section>
@@ -408,32 +412,83 @@ function ActivityLog({ events, onOpen }: { events: ConversationEvent[]; onOpen: 
 }
 
 interface ActivityDialogProps {
-  events: ConversationEvent[];
+  traces: TurnTrace[];
   open: boolean;
   onClose: () => void;
+  onLoadItem: (turnId: number, itemId: string) => Promise<TraceItemDetail>;
 }
 
-/** Show the full safe event journal in a large dialog without widening the chat layout. */
-export function ActivityDialog({ events, open, onClose }: ActivityDialogProps) {
+type TraceFilter = "all" | "model" | "tool" | "security" | "error";
+
+/** Show grouped model and tool traces without widening the chat layout. */
+export function ActivityDialog({ traces, open, onClose, onLoadItem }: ActivityDialogProps) {
   const dialog = useRef<HTMLElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
   const onCloseRef = useRef(onClose);
-  const [selectedSequence, setSelectedSequence] = useState<number | null>(null);
+  const [filter, setFilter] = useState<TraceFilter>("all");
+  const [selected, setSelected] = useState<{ turnId: number; itemId: string } | null>(null);
+  const [detail, setDetail] = useState<TraceItemDetail | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [loadingDetail, setLoadingDetail] = useState(false);
   onCloseRef.current = onClose;
-  const activityEvents = executionEvents(events).reverse();
-  const selectedEvent = activityEvents.find((event) => event.sequence === selectedSequence) ?? activityEvents[0] ?? null;
+  const traceItems = traces.flatMap((trace) => trace.items.map((item) => ({ turnId: trace.turn_id, item }))).reverse();
+  const visibleItems = traceItems.filter(({ item }) => matchesTraceFilter(item, filter));
+  const selectedItem = visibleItems.find(({ turnId, item }) => (
+    turnId === selected?.turnId && item.item_id === selected.itemId
+  )) ?? visibleItems[0] ?? null;
 
   useEffect(() => {
     if (!open) {
-      setSelectedSequence(null);
+      setSelected(null);
+      setDetail(null);
+      setDetailError(null);
       return;
     }
-    setSelectedSequence((previous) => (
-      previous !== null && activityEvents.some((event) => event.sequence === previous)
+    setSelected((previous) => (
+      previous !== null && visibleItems.some(({ turnId, item }) => (
+        turnId === previous.turnId && item.item_id === previous.itemId
+      ))
         ? previous
-        : activityEvents[0]?.sequence ?? null
+        : selectedItem ? { turnId: selectedItem.turnId, itemId: selectedItem.item.item_id } : null
     ));
-  }, [events, open]);
+  }, [filter, open, selectedItem, visibleItems]);
+
+  useEffect(() => {
+    if (!open || !selectedItem) {
+      return;
+    }
+    let active = true;
+    setLoadingDetail(true);
+    setDetail(null);
+    setDetailError(null);
+    void onLoadItem(selectedItem.turnId, selectedItem.item.item_id)
+      .then((nextDetail) => {
+        if (active) {
+          setDetail(nextDetail);
+        }
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setDetail(null);
+          setDetailError(error instanceof Error ? error.message : "无法读取追踪详情");
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setLoadingDetail(false);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [
+    onLoadItem,
+    open,
+    selectedItem?.item.duration_ms,
+    selectedItem?.item.item_id,
+    selectedItem?.item.status,
+    selectedItem?.turnId,
+  ]);
 
   useEffect(() => {
     if (!open) {
@@ -492,30 +547,45 @@ export function ActivityDialog({ events, open, onClose }: ActivityDialogProps) {
             <Icon name="close" size={18} />
           </button>
         </header>
-        <p className="activity-dialog-description">仅显示安全事件摘要；消息正文、原始推理和凭据不会在这里展示。</p>
-        {activityEvents.length === 0 ? (
-          <p className="activity-dialog-empty">当前会话尚未产生工具调用或生命周期事件。</p>
+        <p className="activity-dialog-description">请求与响应仅在此本地详情中按需读取；认证信息和常见密钥会被脱敏，模型原始推理不会记录。</p>
+        {traceItems.length === 0 ? (
+          <p className="activity-dialog-empty">当前会话尚未产生可查看的运行追踪。</p>
         ) : (
           <div className="activity-dialog-body">
-            <nav aria-label="执行事件列表" className="activity-event-menu">
-              {activityEvents.map((event) => (
+            <nav aria-label="运行追踪列表" className="activity-event-menu">
+              <div className="trace-filters" role="group" aria-label="追踪筛选">
+                {(["all", "model", "tool", "security", "error"] as const).map((name) => (
+                  <button
+                    aria-pressed={filter === name}
+                    className={filter === name ? "active" : ""}
+                    key={name}
+                    type="button"
+                    onClick={() => setFilter(name)}
+                  >
+                    {traceFilterLabel(name)}
+                  </button>
+                ))}
+              </div>
+              {visibleItems.map(({ turnId, item }) => (
                 <button
-                  aria-pressed={event.sequence === selectedEvent?.sequence}
-                  className={`activity-event-option ${event.sequence === selectedEvent?.sequence ? "selected" : ""}`}
-                  key={event.sequence}
+                  aria-pressed={turnId === selectedItem?.turnId && item.item_id === selectedItem.item.item_id}
+                  className={`activity-event-option trace-option trace-${item.kind} ${item.parent_id ? "trace-child" : ""} ${turnId === selectedItem?.turnId && item.item_id === selectedItem.item.item_id ? "selected" : ""}`}
+                  key={`${turnId}-${item.item_id}`}
                   type="button"
-                  onClick={() => setSelectedSequence(event.sequence)}
+                  onClick={() => setSelected({ turnId, itemId: item.item_id })}
                 >
-                  <span className={`activity-event-dot event-${event.event}`} aria-hidden="true" />
+                  <span className={`trace-kind trace-kind-${item.kind} trace-status-${item.status}`} aria-hidden="true" />
                   <span className="activity-entry-copy">
-                    <strong>{eventLabel(event.event)}</strong>
-                    <small>{activityDescription(event)}</small>
+                    <strong>第 {turnId} 轮 · {item.title}</strong>
+                    <small>{item.summary}{item.duration_ms !== null ? ` · ${item.duration_ms} ms` : ""}</small>
                   </span>
-                  <time>{formatTime(event.timestamp)}</time>
+                  <time>{formatTime(item.started_at)}</time>
                 </button>
               ))}
             </nav>
-            {selectedEvent && <ActivityDetail event={selectedEvent} />}
+            {selectedItem && (
+              <TraceDetail detail={detail} error={detailError} item={selectedItem.item} loading={loadingDetail} />
+            )}
           </div>
         )}
       </section>
@@ -523,59 +593,91 @@ export function ActivityDialog({ events, open, onClose }: ActivityDialogProps) {
   );
 }
 
-/** Render the selected safe event separately so the reader has room for its details. */
-function ActivityDetail({ event }: { event: ConversationEvent }) {
-  const details = activityDetails(event);
+/** Render request and response bodies only after the user opened a trace item. */
+function TraceDetail({
+  detail,
+  error,
+  item,
+  loading,
+}: {
+  detail: TraceItemDetail | null;
+  error: string | null;
+  item: TraceItem;
+  loading: boolean;
+}) {
+  const visible = detail ?? item;
   return (
     <section aria-label="选中事件详情" className="activity-event-detail">
       <header>
         <div>
-          <p>事件详情</p>
-          <h3>{eventLabel(event.event)}</h3>
-          <span>{activityDescription(event)}</span>
+          <p>{visible.kind === "model" ? "模型交换" : "工具执行"}</p>
+          <h3>{visible.title}</h3>
+          <span>{visible.summary}</span>
         </div>
-        <time>{formatTime(event.timestamp)}</time>
+        <time>{formatTime(visible.started_at)}</time>
       </header>
-      {details ? (
-        <pre>{formatDetails(details)}</pre>
-      ) : (
-        <p className="activity-detail-empty">该事件没有额外的安全详情。</p>
-      )}
+      {loading && <p className="activity-detail-empty">正在读取本地详情…</p>}
+      {error && <p className="activity-detail-empty">{error}</p>}
+      {!loading && !error && detail && <>
+        <TracePayload title="摘要" value={detail.attributes} />
+        {"request" in detail && <TracePayload title={detail.kind === "model" ? "模型请求" : "工具参数"} value={detail.request} />}
+        {"response" in detail && <TracePayload title={detail.kind === "model" ? "模型响应" : "工具结果"} value={detail.response} />}
+      </>}
     </section>
   );
 }
 
-/** Let users expand one event without forcing operational detail into the chat. */
-function ActivityEntry({ event }: { event: ConversationEvent }) {
-  const details = activityDetails(event);
+/** Keep JSON readable without allowing a detail payload to affect the DOM as HTML. */
+function TracePayload({ title, value }: { title: string; value: unknown }) {
   return (
-    <details className="activity-entry">
-      <summary>
-        <span className={`activity-event-dot event-${event.event}`} aria-hidden="true" />
-        <span className="activity-entry-copy">
-          <strong>{eventLabel(event.event)}</strong>
-          <small>{activityDescription(event)}</small>
-        </span>
-        <time>{formatTime(event.timestamp)}</time>
-      </summary>
-      {details && <pre>{formatDetails(details)}</pre>}
-    </details>
+    <section className="trace-payload">
+      <h4>{title}</h4>
+      <pre>{JSON.stringify(value, null, 2)}</pre>
+    </section>
   );
 }
 
-/** Identify the journal entries that are operational rather than chat messages. */
-function isActivityEvent(event: ConversationEvent): boolean {
-  return event.event !== "conversation_created" && !isMessageEvent(event);
+/** Render one compact trace row in the inspector. */
+function TraceEntry({ item }: { item: TraceItem }) {
+  return (
+    <div className="activity-entry trace-entry">
+      <span className={`trace-kind trace-kind-${item.kind} trace-status-${item.status}`} aria-hidden="true" />
+      <span className="activity-entry-copy">
+        <strong>{item.title}</strong>
+        <small>{item.summary}{item.duration_ms !== null ? ` · ${item.duration_ms} ms` : ""}</small>
+      </span>
+    </div>
+  );
 }
 
-/** Select journal entries that describe agent work rather than chat content. */
-function executionEvents(events: ConversationEvent[]): ConversationEvent[] {
-  return events.filter(isActivityEvent);
+/** Match the tree filter without duplicating security entries in the trace. */
+function matchesTraceFilter(item: TraceItem, filter: TraceFilter): boolean {
+  if (filter === "all") {
+    return true;
+  }
+  if (filter === "error") {
+    return item.status === "failed";
+  }
+  if (filter === "security") {
+    const decision = item.attributes.decision;
+    return typeof decision === "string" && decision !== "allow";
+  }
+  return item.kind === filter;
+}
+
+/** Keep filter names independent from persisted trace values. */
+function traceFilterLabel(filter: TraceFilter): string {
+  return { all: "全部", model: "模型", tool: "工具", security: "安全", error: "错误" }[filter];
 }
 
 /** Avoid treating future event types as chat content by default. */
 function isMessageEvent(event: ConversationEvent): boolean {
   return MESSAGE_EVENTS.has(event.event);
+}
+
+/** Ignore private trace refresh signals when deriving the one-line live status. */
+function isActivityEvent(event: ConversationEvent): boolean {
+  return event.event !== "conversation_created" && event.event !== "trace_updated" && !isMessageEvent(event);
 }
 
 /** Derive one short in-place processing message from the latest safe event. */
@@ -600,24 +702,6 @@ function activityStatus(event: ConversationEvent): string {
     return "正在整理执行结果";
   }
   return eventLabel(event.event);
-}
-
-/** Add context to a log row without exposing the final answer a second time. */
-function activityDescription(event: ConversationEvent): string {
-  const tool = stringDetail(event, "tool");
-  if (tool) {
-    const duration = event.details.duration_ms;
-    return typeof duration === "number" ? `${tool} · ${duration} ms` : tool;
-  }
-  const status = stringDetail(event, "status");
-  const reason = stringDetail(event, "reason");
-  return status ?? reason ?? "查看安全事件详情";
-}
-
-/** Exclude message bodies and task text because the main chat already owns them. */
-function activityDetails(event: ConversationEvent): Record<string, unknown> | null {
-  const { message: _message, task: _task, text: _text, ...details } = event.details;
-  return Object.keys(details).length > 0 ? details : null;
 }
 
 interface ComposerProps {
@@ -695,7 +779,7 @@ export function Composer({ value, disabled, focusKey, submitting, onChange, onSu
 
 interface InspectorProps {
   config: PublicConfig | null;
-  events: ConversationEvent[];
+  traces: TurnTrace[];
   session: ConversationSnapshot | null;
   connection: "connecting" | "connected" | "reconnecting" | "error";
   onCancel: () => void;
@@ -705,7 +789,7 @@ interface InspectorProps {
 }
 
 /** Present session limits, safe execution details, and result summaries without LLM history. */
-export function Inspector({ config, events, session, connection, onCancel, cancelling, onOpenActivity, open }: InspectorProps) {
+export function Inspector({ config, traces, session, connection, onCancel, cancelling, onOpenActivity, open }: InspectorProps) {
   const isRunning = session?.state === "running";
   return (
     <aside aria-hidden={!open} className={`inspector ${open ? "open" : "collapsed"}`} inert={!open}>
@@ -735,7 +819,7 @@ export function Inspector({ config, events, session, connection, onCancel, cance
               <Icon name="pause" /> {cancelling ? "正在取消" : "取消当前任务"}
             </button>
           )}
-          <ActivityLog events={events} onOpen={onOpenActivity} />
+          <ActivityLog traces={traces} onOpen={onOpenActivity} />
           {session.summary && <Summary summary={session.summary} />}
         </>
       ) : (

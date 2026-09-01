@@ -102,6 +102,31 @@ class ResponsesClientTests(unittest.TestCase):
         self.assertNotIn("parallel_tool_calls", request)
         self.assertNotIn("previous_response_id", request)
 
+    def test_trace_callback_receives_normalized_request_and_visible_response(self) -> None:
+        """Local diagnostics can inspect an exchange without exposing SDK objects upstream."""
+
+        recorder = RecordingResponses(
+            {
+                "id": "response-1",
+                "output_text": "Done.",
+                "output": [{"type": "message", "content": []}],
+            }
+        )
+        client = _recording_client(ResponsesClient, recorder)
+        events: list[tuple[str, dict[str, object]]] = []
+        client._trace_callback = lambda event, details: events.append((event, dict(details)))
+
+        client.respond(
+            instructions="Complete the task.",
+            task="Inspect the project.",
+            tools=(),
+            tool_outputs=(),
+        )
+
+        self.assertEqual([event for event, _ in events], ["request", "response"])
+        self.assertEqual(events[0][1]["request"]["model"], "test-model")
+        self.assertEqual(events[1][1]["response"]["output_text"], "Done.")
+
     def test_message_output_is_used_when_a_compatible_response_has_no_output_text_property(self) -> None:
         recorder = RecordingResponses(
             {

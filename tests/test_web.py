@@ -122,6 +122,32 @@ class WebApplicationTests(unittest.TestCase):
         self.assertEqual(deleted_again.status_code, 204)
         self.assertEqual(missing.status_code, 404)
 
+    def test_web_exposes_trace_structure_and_explicit_item_details(self) -> None:
+        """A trace list excludes model bodies until the local user opens one item."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            settings = _settings(workspace)
+            with patch("agent.conversation.build_llm_client", return_value=_FinalLLM()):
+                with TestClient(create_app(settings, workspace)) as client:
+                    created = client.post("/api/conversations")
+                    conversation_id = created.json()["conversation_id"]
+                    client.post(
+                        f"/api/conversations/{conversation_id}/messages",
+                        json={"text": "Explain the workspace."},
+                    )
+                    _wait_for_finished_turn(client.app.state.manager.get(conversation_id))
+                    traces = client.get(f"/api/conversations/{conversation_id}/traces")
+                    item = traces.json()[0]["items"][0]
+                    detail = client.get(
+                        f"/api/conversations/{conversation_id}/traces/1/items/{item['item_id']}"
+                    )
+
+        self.assertEqual(traces.status_code, 200)
+        self.assertNotIn("request", item)
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn("request", detail.json())
+        self.assertIn("response", detail.json())
 
 class _FinalLLM:
     """Offline LLM used only to let a Web session complete its first turn."""
