@@ -36,6 +36,8 @@ const SSE_EVENT_NAMES = [
   "agent_finished",
   "conversation_turn_finished",
   "trace_updated",
+  "context_compacted",
+  "context_compaction_failed",
   "conversation_interrupted",
   "approval_required",
   "approval_resolved",
@@ -351,6 +353,9 @@ export default function App() {
       }
       if (event.event === "approval_resolved" || event.event === "conversation_interrupted") {
         setApprovals((previous) => removeApproval(previous, conversationId));
+      }
+      if (event.event === "context_compaction_failed") {
+        setNotice("历史摘要失败；原始对话已保留。请查看运行记录后继续。");
       }
       if (shouldRefreshSnapshot(event.event)) {
         void api.conversation(conversationId).then(updateSession).catch(() => undefined);
@@ -686,6 +691,8 @@ function shouldRefreshSnapshot(eventName: string): boolean {
   return [
     "conversation_turn_started",
     "conversation_turn_finished",
+    "context_compacted",
+    "context_compaction_failed",
     "conversation_interrupted",
     "conversation_limit_reached",
     "conversation_closed",

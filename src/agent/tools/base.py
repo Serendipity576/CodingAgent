@@ -15,6 +15,18 @@ class ToolError(ValueError):
     """An expected tool failure that can be returned to the model."""
 
 
+class SessionArtifactReader(Protocol):
+    """Read bounded output archived by the active local conversation only."""
+
+    def read_session_artifact(
+        self,
+        artifact_id: str,
+        offset: int,
+        max_chars: int,
+    ) -> tuple[str, Mapping[str, object]]:
+        """Return one checked range plus metadata for the requested artifact."""
+
+
 @dataclass(frozen=True, slots=True)
 class ToolContext:
     """Run-scoped values each tool needs without accessing global state."""
@@ -22,6 +34,7 @@ class ToolContext:
     workspace: Path
     limits: RuntimeLimits
     cancelled: "CancellationCheck | None" = None
+    artifact_reader: SessionArtifactReader | None = None
 
 
 class CancellationCheck(Protocol):

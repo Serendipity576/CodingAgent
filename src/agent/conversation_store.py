@@ -45,6 +45,7 @@ class StoredConversation:
     max_turns: int
     max_history_items: int
     transcript: tuple[dict[str, object], ...]
+    context_state: Mapping[str, object]
     latest_result: Mapping[str, object] | None
     events: tuple[StoredEvent, ...]
     turn_traces: tuple[StoredTurnTrace, ...]
@@ -72,6 +73,7 @@ class ConversationStore:
                     max_turns INTEGER NOT NULL,
                     max_history_items INTEGER NOT NULL,
                     transcript_json TEXT NOT NULL,
+                    context_state_json TEXT NOT NULL DEFAULT '{}',
                     latest_result_json TEXT
                 );
                 CREATE TABLE IF NOT EXISTS conversation_events (
@@ -98,6 +100,7 @@ class ConversationStore:
                 );
                 """
             )
+            self._ensure_conversation_columns(connection)
 
     @property
     def path(self) -> Path:
@@ -116,10 +119,12 @@ class ConversationStore:
         max_history_items: int,
         transcript: Sequence[Mapping[str, object]],
         latest_result: Mapping[str, object] | None,
+        context_state: Mapping[str, object] | None = None,
     ) -> None:
         """Atomically upsert metadata and the client-owned model transcript."""
 
         transcript_json = _json_text([dict(item) for item in transcript])
+        context_state_json = _json_text(dict(context_state or {}))
         result_json = _json_text(dict(latest_result)) if latest_result is not None else None
         updated_at = time()
         with self._lock, self._connection() as connection:
@@ -127,8 +132,9 @@ class ConversationStore:
                 """
                 INSERT INTO conversations (
                     conversation_id, created_at, updated_at, state, turn_count,
-                    max_turns, max_history_items, transcript_json, latest_result_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    max_turns, max_history_items, transcript_json, context_state_json,
+                    latest_result_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(conversation_id) DO UPDATE SET
                     updated_at = excluded.updated_at,
                     state = excluded.state,
@@ -136,6 +142,7 @@ class ConversationStore:
                     max_turns = excluded.max_turns,
                     max_history_items = excluded.max_history_items,
                     transcript_json = excluded.transcript_json,
+                    context_state_json = excluded.context_state_json,
                     latest_result_json = excluded.latest_result_json
                 """,
                 (
@@ -147,6 +154,7 @@ class ConversationStore:
                     max_turns,
                     max_history_items,
                     transcript_json,
+                    context_state_json,
                     result_json,
                 ),
             )
@@ -209,7 +217,7 @@ class ConversationStore:
             rows = connection.execute(
                 """
                 SELECT conversation_id, created_at, state, turn_count, max_turns,
-                       max_history_items, transcript_json, latest_result_json
+                       max_history_items, transcript_json, context_state_json, latest_result_json
                 FROM conversations
                 ORDER BY updated_at DESC, created_at DESC
                 """
@@ -262,6 +270,7 @@ class ConversationStore:
                     row["max_history_items"], "maximum history items"
                 ),
                 transcript=_transcript_json(row["transcript_json"]),
+                context_state=_mapping_json(row["context_state_json"], "context state"),
                 latest_result=_optional_mapping_json(row["latest_result_json"], "latest result"),
                 events=tuple(events_by_conversation.get(str(row["conversation_id"]), ())),
                 turn_traces=tuple(traces_by_conversation.get(str(row["conversation_id"]), ())),
@@ -277,6 +286,19 @@ class ConversationStore:
                 "DELETE FROM conversations WHERE conversation_id = ?", (conversation_id,)
             )
         return cursor.rowcount == 1
+
+    @staticmethod
+    def _ensure_conversation_columns(connection: sqlite3.Connection) -> None:
+        """Add non-destructive columns required by newer local conversation versions."""
+
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(conversations)").fetchall()
+        }
+        if "context_state_json" not in columns:
+            connection.execute(
+                "ALTER TABLE conversations ADD COLUMN context_state_json TEXT NOT NULL DEFAULT '{}'"
+            )
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:

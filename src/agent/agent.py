@@ -71,6 +71,7 @@ class CodingAgent:
         event_callback: Callable[[str, Mapping[str, object]], None] | None = None,
         cancellation: object | None = None,
         trace: TurnTraceRecorder | None = None,
+        artifact_reader: object | None = None,
     ) -> None:
         self._settings = settings
         self._llm = llm
@@ -80,6 +81,7 @@ class CodingAgent:
         self._event_callback = event_callback
         self._cancellation = cancellation
         self._trace = trace
+        self._artifact_reader = artifact_reader
 
     def run(self, task: str) -> TaskResult:
         """Run one task until the model finishes or a deterministic limit stops it."""
@@ -89,6 +91,7 @@ class CodingAgent:
             workspace=self._settings.workspace,
             limits=self._settings.limits,
             cancelled=self._cancellation if _is_cancellation_check(self._cancellation) else None,
+            artifact_reader=_artifact_reader(self._artifact_reader),
         )
         audit_logger = self._audit_logger or AuditLogger.create(self._settings.workspace)
         git_baseline = self._git_baseline or GitStatusSnapshot.capture(
@@ -376,6 +379,12 @@ def _is_cancellation_check(value: object | None) -> bool:
     return callable(getattr(value, "is_set", None))
 
 
+def _artifact_reader(value: object | None) -> object | None:
+    """Pass only objects that implement the active-session artifact reader contract."""
+
+    return value if callable(getattr(value, "read_session_artifact", None)) else None
+
+
 def _record_tool_outputs(llm: object, outputs: tuple[ToolOutput, ...]) -> None:
     """Use optional durable-history support without constraining test LLMs."""
 
@@ -399,6 +408,12 @@ def _event_argument_summary(call: ToolCall) -> dict[str, object]:
     if call.name == "run_command":
         command = arguments.get("command")
         return {"command": command if isinstance(command, list) else None}
+    if call.name == "read_session_artifact":
+        return {
+            "artifact_id": arguments.get("artifact_id"),
+            "offset": arguments.get("offset", 0),
+            "max_chars": arguments.get("max_chars"),
+        }
     return {"argument_keys": sorted(arguments.keys())}
 
 

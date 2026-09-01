@@ -606,6 +606,8 @@ function TraceDetail({
   loading: boolean;
 }) {
   const visible = detail ?? item;
+  const context = traceContext(detail?.attributes);
+  const attributes = withoutTraceContext(detail?.attributes ?? {});
   return (
     <section aria-label="选中事件详情" className="activity-event-detail">
       <header>
@@ -619,12 +621,27 @@ function TraceDetail({
       {loading && <p className="activity-detail-empty">正在读取本地详情…</p>}
       {error && <p className="activity-detail-empty">{error}</p>}
       {!loading && !error && detail && <>
-        <TracePayload title="摘要" value={detail.attributes} />
+        {context && <TracePayload title="上下文构建" value={context} />}
+        <TracePayload title="摘要" value={attributes} />
         {"request" in detail && <TracePayload title={detail.kind === "model" ? "模型请求" : "工具参数"} value={detail.request} />}
         {"response" in detail && <TracePayload title={detail.kind === "model" ? "模型响应" : "工具结果"} value={detail.response} />}
       </>}
     </section>
   );
+}
+
+/** Read the optional selection facts without trusting arbitrary trace payload shapes. */
+function traceContext(attributes: Record<string, unknown> | undefined): Record<string, unknown> | null {
+  const value = attributes?.context;
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+/** Keep context selection in its own panel instead of duplicating it in the generic summary. */
+function withoutTraceContext(attributes: Record<string, unknown>): Record<string, unknown> {
+  const { context: _, ...remaining } = attributes;
+  return remaining;
 }
 
 /** Keep JSON readable without allowing a detail payload to affect the DOM as HTML. */
@@ -811,7 +828,9 @@ export function Inspector({ config, traces, session, connection, onCancel, cance
           <dl className="metrics">
             <div><dt>已处理轮次</dt><dd>{session.turn_count} / {session.max_turns}</dd></div>
             <div><dt>消息队列</dt><dd>{session.queued_messages}</dd></div>
-            <div><dt>本地 history</dt><dd>{session.history_items} / {session.max_history_items}</dd></div>
+            <div><dt>原始历史</dt><dd>{session.history_items} 项</dd></div>
+            <div><dt>请求上下文</dt><dd>{formatTokenCount(session.context.estimated_input_tokens)} / {formatTokenCount(session.context.input_budget_tokens)}</dd></div>
+            <div><dt>本地摘要</dt><dd>v{session.context.summary_version ?? 0} · {session.context.artifact_count ?? 0} 工件</dd></div>
             <div><dt>最近结果</dt><dd>{session.latest_status ?? "尚未执行"}</dd></div>
           </dl>
           {isRunning && (
@@ -835,6 +854,14 @@ export function Inspector({ config, traces, session, connection, onCancel, cance
       </section>
     </aside>
   );
+}
+
+/** Keep large token values readable in the compact inspector. */
+function formatTokenCount(value: number | undefined): string {
+  if (typeof value !== "number" || value <= 0) {
+    return "尚未估算";
+  }
+  return value >= 1_000 ? `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}k` : String(value);
 }
 
 /** Render the bounded end-of-turn summary produced by the backend. */

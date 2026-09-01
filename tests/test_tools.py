@@ -10,6 +10,7 @@ from agent.security.policy import PolicyEngine
 from agent.tools.base import ToolContext
 from agent.tools.filesystem import ApplyPatchTool, ListFilesTool, ReadFileTool
 from agent.tools.registry import ToolRegistry
+from agent.tools.session import ReadSessionArtifactTool
 
 
 class FilesystemToolTests(unittest.TestCase):
@@ -65,6 +66,32 @@ class FilesystemToolTests(unittest.TestCase):
         self.assertIn("visible.txt", result.output)
         self.assertEqual(result.metadata["normalization"]["path"], ".")
 
+    def test_read_session_artifact_is_bounded_and_read_only(self) -> None:
+        """Archived output is available only through the active session reader contract."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            reader = _ArtifactReader()
+            context = ToolContext(
+                workspace=workspace.resolve(),
+                limits=RuntimeLimits(max_steps=10, command_timeout_seconds=10, max_task_seconds=30),
+                artifact_reader=reader,
+            )
+            result = ToolRegistry(
+                [ReadSessionArtifactTool()], policy=PolicyEngine(workspace)
+            ).execute(
+                ToolCall(
+                    call_id="call-1",
+                    name="read_session_artifact",
+                    arguments={"artifact_id": "tool-1", "offset": 2, "max_chars": 4},
+                ),
+                context,
+            )
+
+        self.assertTrue(result.success)
+        self.assertIn("cdef", result.output)
+        self.assertEqual(reader.requests, [("tool-1", 2, 4)])
+
 
 def _context(workspace: Path, *, max_output_chars: int = 2_000) -> ToolContext:
     return ToolContext(
@@ -76,3 +103,19 @@ def _context(workspace: Path, *, max_output_chars: int = 2_000) -> ToolContext:
             max_task_seconds=30,
         ),
     )
+
+
+class _ArtifactReader:
+    """Minimal active-session reader used to verify tool dispatch boundaries."""
+
+    def __init__(self) -> None:
+        self.requests: list[tuple[str, int, int]] = []
+
+    def read_session_artifact(
+        self,
+        artifact_id: str,
+        offset: int,
+        max_chars: int,
+    ) -> tuple[str, dict[str, object]]:
+        self.requests.append((artifact_id, offset, max_chars))
+        return "abcdef"[offset : offset + max_chars], {"artifact_id": artifact_id}

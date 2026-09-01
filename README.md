@@ -84,7 +84,7 @@ For hot-reload development, start `coding-agent serve` in one terminal and run
 `npm run dev` in another; then open `http://127.0.0.1:5173/static/`. Vite proxies
 only `/api` to the loopback FastAPI service.
 
-One workspace executes one Agent turn at a time, even across several browser conversations. Sessions have turn and local-history-item limits; when a limit is reached, start a new conversation rather than silently discarding provider continuation data. Completed sessions can be resumed after restart until they are explicitly deleted.
+One workspace executes one Agent turn at a time, even across several browser conversations. Sessions have a turn limit, while their complete raw transcript remains local until explicit deletion. Each model request uses a separately selected, budgeted context view; completed older history can be summarized without losing the original record. Completed sessions can be resumed after restart.
 
 ## Safety boundary
 
@@ -104,7 +104,9 @@ Each task writes append-only JSONL events to `.agent/logs/<task-id>.jsonl`. Even
 
 The final CLI JSON includes a task summary: changed-file count and paths from successful `apply_patch` calls, per-file added/removed-line counts, the latest recognized test result, blocked actions, and approved high-risk actions.
 
-Web conversations additionally keep a private, per-turn runtime trace in the local session database. It groups model exchanges and their tool calls, including duration, policy decision, completion state, and terminal result. The normal trace list and SSE updates never contain model request/response bodies. Opening one trace item in the local Web page requests its sanitized request or response on demand; API keys, authentication headers, common credential fields, and common secret patterns are redacted, oversized text is marked as truncated, and encrypted model reasoning is not recorded.
+Web conversations additionally keep a private, per-turn runtime trace in the local session database. It groups model exchanges and their tool calls, including duration, policy decision, completion state, terminal result, and context-selection facts. The normal trace list and SSE updates never contain model request/response bodies. Opening one trace item in the local Web page requests its sanitized request or response on demand; API keys, authentication headers, common credential fields, and common secret patterns are redacted, oversized text is marked as truncated, and encrypted model reasoning is not recorded.
+
+The context manager uses a fixed DeepSeek-V4-Flash baseline: a 1,048,576-token window, a 393,216-token output reserve, and a local safety margin. These are application defaults rather than environment variables. It preserves raw history in SQLite, stores structured summaries separately, retains oversized tool output locally as conversation artifacts, and lets the Agent read a referenced artifact in bounded chunks when needed.
 
 ## Security verification and demo
 
@@ -145,7 +147,7 @@ provider, API, endpoint, model, or generated-token settings as arguments.
 | Task timeout | `CODING_AGENT_MAX_TASK_SECONDS` | `900` seconds |
 | Repeated tool failure limit | `CODING_AGENT_MAX_CONSECUTIVE_TOOL_FAILURES` | `2` |
 | Conversation turn limit | `CODING_AGENT_MAX_CONVERSATION_TURNS` | `50` |
-| Local history item limit | `CODING_AGENT_MAX_HISTORY_ITEMS` | `300` |
+| Local working-context baseline | Fixed in application code | DeepSeek-V4-Flash: 1,048,576-token window / 393,216-token output reserve |
 
 Store `CODING_AGENT_API_KEY` in the untracked local `.env` file; never commit it. The loader reads `CODING_AGENT_PROVIDER`, `CODING_AGENT_API_KEY`, `CODING_AGENT_BASE_URL`, `CODING_AGENT_MODEL`, and the optional `CODING_AGENT_MAX_OUTPUT_TOKENS` as literal values. It does not expand or execute its contents. Set `CODING_AGENT_PROVIDER` to `openai`, `deepseek`, or `responses`; the final value selects the corresponding internal adapter without inferring it from the URL.
 

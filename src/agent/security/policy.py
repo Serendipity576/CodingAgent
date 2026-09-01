@@ -29,6 +29,8 @@ class PolicyEngine:
             return self._deny("invalid_arguments", "tool arguments are invalid")
         if call.name in self._PATH_TOOLS:
             return self._file_decision(call)
+        if call.name == "read_session_artifact":
+            return self._session_artifact_decision(call)
         if call.name == "run_command":
             return self._command_policy.evaluate(call.arguments.get("command"))
         return self._deny("unknown_tool", f"tool is not registered for policy: {call.name}")
@@ -57,6 +59,23 @@ class PolicyEngine:
             RiskLevel.LOW,
             "workspace read-only operation",
             "workspace_read",
+        )
+
+    def _session_artifact_decision(self, call: ToolCall) -> PolicyDecision:
+        """Allow bounded reads from the already-owned active conversation only."""
+
+        artifact_id = call.arguments.get("artifact_id")
+        if not isinstance(artifact_id, str) or not artifact_id.strip():
+            return self._deny("invalid_arguments", "artifact_id must be a non-empty string")
+        for name in ("offset", "max_chars"):
+            value = call.arguments.get(name)
+            if value is not None and (type(value) is not int or value < 0):
+                return self._deny("invalid_arguments", f"{name} must be a non-negative integer")
+        return PolicyDecision(
+            Decision.ALLOW,
+            RiskLevel.LOW,
+            "read-only local conversation artifact",
+            "conversation_read",
         )
 
     @staticmethod

@@ -19,6 +19,8 @@ export function eventLabel(event: string): string {
     assistant_message: "Agent 回复",
     agent_finished: "Agent 已结束本轮",
     conversation_turn_finished: "本轮处理已结束",
+    context_compacted: "已更新本地上下文摘要",
+    context_compaction_failed: "本地上下文摘要失败",
     conversation_interrupted: "服务重启后会话已中断",
     approval_required: "等待高风险操作确认",
     approval_resolved: "高风险操作已处理",

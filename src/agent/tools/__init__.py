@@ -6,6 +6,7 @@ from agent.security.approval import ApprovalHandler
 from agent.security.policy import PolicyEngine
 from agent.tools.filesystem import ApplyPatchTool, ListFilesTool, ReadFileTool
 from agent.tools.registry import ToolRegistry
+from agent.tools.session import ReadSessionArtifactTool
 from agent.tools.shell import RunCommandTool
 
 
@@ -18,6 +19,7 @@ def build_default_registry(
         [
             ListFilesTool(),
             ReadFileTool(),
+            ReadSessionArtifactTool(),
             ApplyPatchTool(),
             RunCommandTool(),
         ],

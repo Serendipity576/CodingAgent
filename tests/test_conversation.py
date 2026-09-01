@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path
+import sqlite3
 import tempfile
 from time import monotonic
 from types import SimpleNamespace
@@ -79,6 +80,38 @@ class DurableRecordingLLM(RecordingLLM):
 
         self._history = [dict(item) for item in history]
         self.restored_history = deepcopy(self._history)
+
+
+class ContextDurableRecordingLLM(DurableRecordingLLM):
+    """Durable fake that also persists context metadata beside its raw transcript."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.context_state: dict[str, object] = {
+            "version": 1,
+            "summary": {"current_goal": "继续会话"},
+            "summary_version": 1,
+            "covered_items": 2,
+            "artifacts": [],
+            "token_multiplier": 1.0,
+        }
+        self.restored_context_state: dict[str, object] | None = None
+
+    def export_context_state(self) -> dict[str, object]:
+        """Return a copy so persisted context metadata is never caller-owned."""
+
+        return deepcopy(self.context_state)
+
+    def restore_context_state(self, state: Mapping[str, object]) -> None:
+        """Record the recovered state for the restart assertion."""
+
+        self.context_state = dict(state)
+        self.restored_context_state = deepcopy(self.context_state)
+
+    def context_status(self) -> dict[str, object]:
+        """Expose only compact context metadata to a session snapshot."""
+
+        return {"summary_version": self.context_state.get("summary_version", 0)}
 
 
 class ConversationTests(unittest.TestCase):
@@ -203,6 +236,61 @@ class ConversationTests(unittest.TestCase):
                 self.assertEqual(events[-1].event, "conversation_interrupted")
                 self.assertTrue(session.submit("Continue after review."))
                 _wait_for_finished_turn(session, 2)
+
+    def test_session_restores_context_metadata_separately_from_raw_history(self) -> None:
+        """Summary metadata survives restart without replacing the complete transcript."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            first_llm = ContextDurableRecordingLLM()
+            restored_llm = ContextDurableRecordingLLM()
+            with patch(
+                "agent.conversation.build_llm_client",
+                side_effect=[first_llm, restored_llm],
+            ):
+                manager = ConversationManager(_settings(workspace), workspace)
+                session = manager.create()
+                self.assertTrue(session.submit("First message."))
+                _wait_for_finished_turn(session, 1)
+                restored_manager = ConversationManager(_settings(workspace), workspace)
+                restored = restored_manager.get(session.id)
+
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored_llm.restored_context_state, first_llm.context_state)
+
+    def test_store_migrates_existing_sessions_without_context_metadata(self) -> None:
+        """Older local databases gain the new column without losing their transcript."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            database_dir = workspace / ".agent" / "conversations"
+            database_dir.mkdir(parents=True)
+            database = database_dir / "sessions.sqlite3"
+            with sqlite3.connect(database) as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE conversations (
+                        conversation_id TEXT PRIMARY KEY,
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        state TEXT NOT NULL,
+                        turn_count INTEGER NOT NULL,
+                        max_turns INTEGER NOT NULL,
+                        max_history_items INTEGER NOT NULL,
+                        transcript_json TEXT NOT NULL,
+                        latest_result_json TEXT
+                    );
+                    INSERT INTO conversations VALUES (
+                        'legacy-session', 1, 1, 'idle', 1, 4, 20, '[]', NULL
+                    );
+                    """
+                )
+
+            loaded = ConversationStore(workspace).load_conversations()
+
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(loaded[0].conversation_id, "legacy-session")
+        self.assertEqual(loaded[0].context_state, {})
 
 
 def _wait_for_finished_turn(session: object, turn_id: int) -> None:

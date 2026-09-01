@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from agent.config import RuntimeLimits, Settings
 from agent.llm.client import (
@@ -27,6 +28,21 @@ class RecordingResponses:
 
         self.requests.append(request)
         return self.response
+
+
+class SequencedResponses:
+    """Return or raise one prepared outcome per SDK request."""
+
+    def __init__(self, outcomes: list[object]) -> None:
+        self._outcomes = list(outcomes)
+        self.requests: list[dict[str, object]] = []
+
+    def create(self, **request: object) -> object:
+        self.requests.append(request)
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
 
 class ResponsesClientTests(unittest.TestCase):
@@ -347,6 +363,65 @@ class ResponsesClientTests(unittest.TestCase):
         self.assertIn("earlier agent turn ended", input_items[2]["output"])
         self.assertEqual(input_items[3], {"role": "user", "content": "Continue safely."})
 
+    def test_context_summary_never_replaces_the_complete_local_transcript(self) -> None:
+        """A compact request view must not destroy durable raw history needed for recovery."""
+
+        recorder = RecordingResponses(
+            {"id": "summary-1", "output_text": '{"current_goal":"继续"}', "output": []}
+        )
+        client = _recording_client(ResponsesClient, recorder)
+        client._history = _completed_history()
+        original = client.export_history()
+
+        with patch("agent.conversation_memory.COMPACTION_TRIGGER_TOKENS", 1):
+            result = client.compact_context()
+
+        self.assertIsNotNone(result)
+        self.assertEqual(recorder.requests[0]["max_output_tokens"], 8_192)
+        recorder.response = {"id": "response-2", "output_text": "done", "output": []}
+        client.respond(
+            instructions="Continue.",
+            task="下一步是什么？",
+            tools=(),
+            tool_outputs=(),
+        )
+
+        request_input = recorder.requests[1]["input"]
+        self.assertEqual(request_input[0]["role"], "developer")
+        self.assertEqual(client.export_history()[: len(original)], original)
+        self.assertEqual(client.export_history()[-1]["role"], "user")
+
+    def test_context_limit_retries_once_with_a_summary_backed_emergency_view(self) -> None:
+        """A retry happens before tools only when durable local summary state is available."""
+
+        recorder = SequencedResponses(
+            [
+                RuntimeError("maximum context length exceeded"),
+                {"id": "response-2", "output_text": "done", "output": []},
+            ]
+        )
+        client = _recording_client(ResponsesClient, recorder)
+        client._history = _completed_history()
+        memory = client._memory_manager()
+        with patch("agent.conversation_memory.COMPACTION_TRIGGER_TOKENS", 1):
+            plan = memory.compaction_plan(client._history)
+        assert plan is not None
+        memory.apply_summary(plan, '{"current_goal":"继续"}')
+
+        response = client.respond(
+            instructions="Continue.",
+            task="下一步是什么？",
+            tools=(),
+            tool_outputs=(),
+        )
+
+        self.assertEqual(response.text, "done")
+        self.assertEqual(len(recorder.requests), 2)
+        self.assertLessEqual(
+            len(recorder.requests[1]["input"]),
+            len(recorder.requests[0]["input"]),
+        )
+
     def test_explicit_provider_selects_the_matching_internal_adapter(self) -> None:
         self.assertIs(
             _client_class_for_provider("openai"),
@@ -380,3 +455,21 @@ def _recording_client(
     client._max_output_tokens = max_output_tokens
     client._history = []
     return client
+
+
+def _completed_history() -> list[dict[str, object]]:
+    """Create enough complete turns for a deterministic compaction boundary."""
+
+    history: list[dict[str, object]] = []
+    for index in range(1, 6):
+        history.extend(
+            [
+                {"role": "user", "content": f"task {index}"},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": f"result {index}"}],
+                },
+            ]
+        )
+    return history

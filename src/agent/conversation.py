@@ -18,7 +18,7 @@ from agent.audit import AuditLogger
 from agent.change_tracker import GitStatusSnapshot
 from agent.config import Settings
 from agent.conversation_store import ConversationStore, StoredConversation
-from agent.llm.client import LLMClient, build_llm_client
+from agent.llm.client import LLMClient, LLMRequestError, build_llm_client
 from agent.security.approval import ApprovalHandler
 from agent.tools import build_default_registry
 from agent.tools.registry import ToolRegistry
@@ -149,13 +149,6 @@ class ConversationSession:
                 ConversationState.CLOSED,
                 ConversationState.LIMIT_REACHED,
             }:
-                return False
-            if self._history_item_count() >= self._max_history_items:
-                self._state = ConversationState.LIMIT_REACHED
-                self.publish(
-                    "conversation_limit_reached",
-                    {"max_history_items": self._max_history_items, "reason": "history_limit"},
-                )
                 return False
             if self._turn_count + len(self._queue) >= self._max_turns:
                 self._state = ConversationState.LIMIT_REACHED
@@ -292,6 +285,7 @@ class ConversationSession:
                 "queued_messages": len(self._queue),
                 "history_items": self._history_item_count(),
                 "max_history_items": self._max_history_items,
+                "context": _context_status(self._llm),
                 "latest_status": result.get("status") if result else None,
                 "latest_message": result.get("message") if result else None,
                 "summary": result.get("summary") if result else None,
@@ -327,6 +321,7 @@ class ConversationSession:
         }
         self._state = _stored_state(restored.state)
         _restore_history(self._llm, restored.transcript)
+        _restore_context_state(self._llm, restored.context_state)
 
         if self._state is ConversationState.RUNNING:
             # A process restart cannot prove whether an external command or
@@ -367,6 +362,7 @@ class ConversationSession:
                 )
                 with self._lock:
                     self._active_trace = trace
+                self._compact_context_before_turn(trace)
                 turn_git_baseline = GitStatusSnapshot.capture(self.workspace)
                 logger = AuditLogger.create(
                     self.workspace,
@@ -383,6 +379,7 @@ class ConversationSession:
                     event_callback=self.publish,
                     cancellation=self._cancel_event,
                     trace=trace,
+                    artifact_reader=_artifact_reader(self._llm),
                 )
                 result = agent.run(message)
                 with self._lock:
@@ -453,6 +450,7 @@ class ConversationSession:
                 max_history_items=self._max_history_items,
                 transcript=_export_history(self._llm),
                 latest_result=self._latest_result_data or _result_data(self._latest_result),
+                context_state=_export_context_state(self._llm),
             )
 
     def _history_item_count(self) -> int:
@@ -463,6 +461,55 @@ class ConversationSession:
             return len(exported)
         history = getattr(self._llm, "_history", ())
         return len(history) if isinstance(history, list) else 0
+
+    def _compact_context_before_turn(self, trace: TurnTraceRecorder) -> None:
+        """Summarize old completed history before the new turn needs a model request."""
+
+        if not _context_compaction_required(self._llm):
+            return
+        started_at = time()
+        trace_id = trace.model_started(
+            step=0,
+            title="上下文摘要",
+            request={"operation": "context_summary"},
+        )
+        try:
+            result = _compact_context(self._llm)
+        except LLMRequestError as error:
+            trace.model_failed(
+                trace_id,
+                error=str(error),
+                duration_ms=int((time() - started_at) * 1000),
+            )
+            self.publish(
+                "context_compaction_failed",
+                {"message": "历史摘要失败；原始对话已保留，本轮将继续尝试。"},
+            )
+            return
+        if result is None:
+            trace.model_failed(
+                trace_id,
+                error="context summary was not created",
+                duration_ms=int((time() - started_at) * 1000),
+            )
+            return
+        trace.model_finished(
+            trace_id,
+            response={
+                "response_id": "local-context-summary",
+                "output_text": "已更新本地上下文摘要",
+                "tool_calls": (),
+                "usage": None,
+            },
+            duration_ms=int((time() - started_at) * 1000),
+        )
+        self.publish(
+            "context_compacted",
+            {
+                "summary_version": getattr(result, "summary_version", None),
+                "covered_history_items": getattr(result, "covered_history_items", None),
+            },
+        )
 
     def _deny_pending_approvals(self) -> None:
         """Release a browser approval wait when cancellation, close, or delete occurs."""
@@ -588,6 +635,56 @@ def _restore_history(llm: object, transcript: Sequence[Mapping[str, object]]) ->
     if not callable(restorer):
         raise ValueError("configured LLM client cannot restore persisted conversation history")
     restorer(transcript)
+
+
+def _export_context_state(llm: object) -> Mapping[str, object]:
+    """Copy optional context metadata without requiring it from lightweight test doubles."""
+
+    exporter = getattr(llm, "export_context_state", None)
+    if not callable(exporter):
+        return {}
+    state = exporter()
+    if not isinstance(state, Mapping):
+        raise ValueError("LLM context export must return a mapping")
+    return dict(state)
+
+
+def _restore_context_state(llm: object, state: Mapping[str, object]) -> None:
+    """Restore optional local context metadata only after the raw transcript is present."""
+
+    restorer = getattr(llm, "restore_context_state", None)
+    if callable(restorer):
+        restorer(state)
+
+
+def _context_status(llm: object) -> Mapping[str, object]:
+    """Return context-health facts while keeping raw transcript bodies private."""
+
+    reader = getattr(llm, "context_status", None)
+    if not callable(reader):
+        return {}
+    status = reader()
+    return dict(status) if isinstance(status, Mapping) else {}
+
+
+def _context_compaction_required(llm: object) -> bool:
+    """Check optional context compaction support without constraining test doubles."""
+
+    checker = getattr(llm, "context_compaction_required", None)
+    return bool(checker()) if callable(checker) else False
+
+
+def _compact_context(llm: object) -> object | None:
+    """Run optional local compaction through the configured stateless LLM client."""
+
+    compact = getattr(llm, "compact_context", None)
+    return compact() if callable(compact) else None
+
+
+def _artifact_reader(llm: object) -> object | None:
+    """Expose only the active session's bounded artifact reader to runtime tools."""
+
+    return llm if callable(getattr(llm, "read_session_artifact", None)) else None
 
 
 def _result_data(result: TaskResult | None) -> dict[str, object] | None:

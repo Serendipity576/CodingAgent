@@ -37,3 +37,25 @@ class TurnTraceRecorderTests(unittest.TestCase):
         self.assertIsNotNone(detail)
         self.assertEqual(detail["request"]["api_key"], "[已脱敏]")
 
+    def test_context_selection_is_visible_only_in_opened_model_detail(self) -> None:
+        """The trace explains context selection without placing request bodies in list views."""
+
+        trace = TurnTraceRecorder(
+            conversation_id="conversation-1",
+            turn_id=1,
+            on_change=lambda _: None,
+        )
+        model_id = trace.model_started(step=1, request={"model": "test"})
+        trace.record_llm_payload(
+            "request",
+            {
+                "request": {"model": "test", "input": [], "tools": []},
+                "context": {"estimated_input_tokens": 120, "summary_version": 2},
+            },
+        )
+        private = trace.snapshot()
+        public = public_turn_trace(private)
+        detail = trace_item_detail(private, model_id)
+
+        self.assertNotIn("request", public["items"][0])
+        self.assertEqual(detail["attributes"]["context"]["summary_version"], 2)

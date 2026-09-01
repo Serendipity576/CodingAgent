@@ -27,9 +27,21 @@ export interface ConversationSnapshot {
   queued_messages: number;
   history_items: number;
   max_history_items: number;
+  context: ConversationContext;
   latest_status: string | null;
   latest_message: string | null;
   summary: TaskSummary | null;
+}
+
+/** Local context-budget facts; raw messages and tool outputs never leave the backend. */
+export interface ConversationContext {
+  context_window_tokens?: number;
+  input_budget_tokens?: number;
+  estimated_input_tokens?: number;
+  raw_history_tokens?: number;
+  summary_version?: number;
+  covered_history_items?: number;
+  artifact_count?: number;
 }
 
 export type TraceKind = "model" | "tool";

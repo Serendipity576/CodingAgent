@@ -60,12 +60,18 @@ class TurnTraceRecorder:
         }
         self._notify()
 
-    def model_started(self, *, step: int, request: Mapping[str, object]) -> str:
+    def model_started(
+        self,
+        *,
+        step: int,
+        request: Mapping[str, object],
+        title: str | None = None,
+    ) -> str:
         """Start one model span with a generic fallback request representation."""
 
         item_id = self._append_item(
             kind="model",
-            title=f"模型调用 #{step}",
+            title=title or f"模型调用 #{step}",
             summary="正在请求模型",
             attributes={"step": step},
         )
@@ -83,7 +89,7 @@ class TurnTraceRecorder:
             if item_id is None:
                 return
             item = self._item(item_id)
-            if event == "request":
+            if event in {"request", "context_summary_request", "context_retry"}:
                 request = details.get("request")
                 if isinstance(request, Mapping):
                     item["request"] = _sanitize(request)
@@ -91,11 +97,23 @@ class TurnTraceRecorder:
                         **_mapping(item.get("attributes")),
                         **_model_request_attributes(request),
                     }
-            elif event == "response":
+                context = details.get("context")
+                if isinstance(context, Mapping):
+                    item["attributes"] = {
+                        **_mapping(item.get("attributes")),
+                        "context": _sanitize(context),
+                    }
+            elif event in {"response", "context_summary_response"}:
                 response = details.get("response")
                 if isinstance(response, Mapping):
                     item["response"] = _sanitize(response)
-            elif event == "error":
+                context = details.get("context")
+                if isinstance(context, Mapping):
+                    item["attributes"] = {
+                        **_mapping(item.get("attributes")),
+                        "context": _sanitize(context),
+                    }
+            elif event in {"error", "context_summary_error"}:
                 item["response"] = _sanitize({"error": details.get("error")})
         self._notify()
 
