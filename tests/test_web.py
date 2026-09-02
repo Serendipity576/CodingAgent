@@ -122,6 +122,28 @@ class WebApplicationTests(unittest.TestCase):
         self.assertEqual(deleted_again.status_code, 204)
         self.assertEqual(missing.status_code, 404)
 
+    def test_closed_conversation_does_not_report_a_removed_turn_limit(self) -> None:
+        """The API reports the real rejection reason after session turn caps were removed."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            settings = _settings(workspace)
+            with patch("agent.conversation.build_llm_client", return_value=_FinalLLM()):
+                with TestClient(create_app(settings, workspace)) as client:
+                    created = client.post("/api/conversations")
+                    conversation_id = created.json()["conversation_id"]
+                    session = client.app.state.manager.get(conversation_id)
+                    assert session is not None
+                    session.close()
+                    response = client.post(
+                        f"/api/conversations/{conversation_id}/messages",
+                        json={"text": "Continue."},
+                    )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("closed", response.json()["detail"])
+        self.assertNotIn("turn limit", response.json()["detail"])
+
     def test_web_exposes_trace_structure_and_explicit_item_details(self) -> None:
         """A trace list excludes model bodies until the local user opens one item."""
 

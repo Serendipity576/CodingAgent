@@ -11,6 +11,47 @@ from agent.security.sensitive import SensitiveDataGuard
 from agent.tools.base import ToolContext, ToolError, ToolResult, truncate_text
 
 
+_MAX_LISTED_ENTRIES = 2_000
+
+
+class _DirectoryListing:
+    """Collect a finite directory prefix before rendering it for the model."""
+
+    def __init__(self, output_limit: int) -> None:
+        self._entry_limit = min(_MAX_LISTED_ENTRIES, max(100, output_limit // 4))
+        self._scan_limit = self._entry_limit * 4
+        self.entries: list[str] = []
+        self.scanned_entries = 0
+        self.truncated = False
+
+    def can_scan(self) -> bool:
+        """Stop traversal when a dense directory would exceed the fixed scan budget."""
+
+        if self.scanned_entries >= self._scan_limit:
+            self.truncated = True
+            return False
+        self.scanned_entries += 1
+        return True
+
+    def add(self, entry: str) -> bool:
+        """Store one visible entry and signal when the global entry limit is reached."""
+
+        if len(self.entries) >= self._entry_limit:
+            self.truncated = True
+            return False
+        self.entries.append(entry)
+        return True
+
+    def render(self, output_limit: int) -> str:
+        """Return a concise listing without retaining an unbounded directory tree."""
+
+        entries = list(self.entries)
+        if self.truncated:
+            entries.append("... [listing truncated: entry or scan limit reached]")
+        output = "\n".join(entries) if entries else "(empty directory)"
+        return truncate_text(output, output_limit)
+
+
 def resolve_workspace_path(context: ToolContext, requested_path: object) -> Path:
     """Resolve a requested path and require it to remain below the workspace."""
 
@@ -71,17 +112,16 @@ class ListFilesTool:
         if type(max_depth) is not int or not 0 <= max_depth <= 5:
             raise ToolError("max_depth must be an integer from 0 to 5")
 
-        entries: list[str] = []
+        listing = _DirectoryListing(context.limits.max_output_chars)
         self._walk(
             target,
             context.workspace.resolve(),
             max_depth,
             0,
-            entries,
+            listing,
             SensitiveDataGuard(),
         )
-        output = "\n".join(entries) if entries else "(empty directory)"
-        return ToolResult.succeeded(truncate_text(output, context.limits.max_output_chars))
+        return ToolResult.succeeded(listing.render(context.limits.max_output_chars))
 
     def _walk(
         self,
@@ -89,15 +129,12 @@ class ListFilesTool:
         workspace: Path,
         max_depth: int,
         current_depth: int,
-        entries: list[str],
+        listing: _DirectoryListing,
         sensitive_guard: SensitiveDataGuard,
     ) -> None:
-        try:
-            children = sorted(directory.iterdir(), key=lambda child: child.name.lower())
-        except OSError as error:
-            raise ToolError(f"could not list directory: {error}") from error
-
-        for child in children:
+        for child in _directory_children(directory):
+            if not listing.can_scan():
+                return
             relative = child.relative_to(workspace).as_posix()
             if sensitive_guard.reason(Path(relative)):
                 # A directory listing must not reveal protected local state
@@ -105,20 +142,25 @@ class ListFilesTool:
                 continue
             if child.is_symlink():
                 # Show links for diagnosis but never traverse them during P1.
-                entries.append(f"{relative}@")
+                if not listing.add(f"{relative}@"):
+                    return
             elif child.is_dir():
-                entries.append(f"{relative}/")
+                if not listing.add(f"{relative}/"):
+                    return
                 if current_depth < max_depth:
                     self._walk(
                         child,
                         workspace,
                         max_depth,
                         current_depth + 1,
-                        entries,
+                        listing,
                         sensitive_guard,
                     )
+                    if listing.truncated:
+                        return
             else:
-                entries.append(relative)
+                if not listing.add(relative):
+                    return
 
 
 class ReadFileTool:
@@ -148,10 +190,10 @@ class ReadFileTool:
             raise ToolError("path must identify a regular file")
 
         try:
-            content = target.read_text(encoding="utf-8", errors="replace")
+            content = _read_text_prefix(target, context.limits.max_output_chars)
         except OSError as error:
             raise ToolError(f"could not read file: {error}") from error
-        return ToolResult.succeeded(truncate_text(content, context.limits.max_output_chars))
+        return ToolResult.succeeded(content)
 
 
 class ApplyPatchTool:
@@ -240,3 +282,25 @@ def _diff_summary(before: str, after: str) -> dict[str, int]:
         elif line.startswith("-"):
             removed_lines += 1
     return {"added_lines": added_lines, "removed_lines": removed_lines}
+
+
+def _read_text_prefix(target: Path, output_limit: int) -> str:
+    """Read only one bounded text prefix instead of loading an arbitrary file."""
+
+    with target.open("r", encoding="utf-8", errors="replace") as stream:
+        content = stream.read(output_limit + 1)
+    if len(content) <= output_limit:
+        return content
+    marker = "\n... [truncated: file exceeds output limit]"
+    if output_limit <= len(marker):
+        return content[:output_limit]
+    return f"{content[: output_limit - len(marker)]}{marker}"
+
+
+def _directory_children(directory: Path):
+    """Translate filesystem iteration failures into recoverable tool errors."""
+
+    try:
+        yield from directory.iterdir()
+    except OSError as error:
+        raise ToolError(f"could not list directory: {error}") from error

@@ -91,7 +91,7 @@ def create_app(settings: Settings, workspace: Path) -> FastAPI:
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         if not accepted:
-            raise HTTPException(status_code=409, detail="conversation is closed or at its turn limit")
+            raise HTTPException(status_code=409, detail="conversation is closed or has been deleted")
         return session.snapshot()
 
     @app.post("/api/conversations/{conversation_id}/cancel")

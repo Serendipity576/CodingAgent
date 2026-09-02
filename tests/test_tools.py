@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 
 from agent.config import RuntimeLimits
 from agent.llm.models import ToolCall
+from agent.sandbox import SandboxInvocation
 from agent.security.policy import PolicyEngine
 from agent.tools.base import ToolContext
 from agent.tools.filesystem import ApplyPatchTool, ListFilesTool, ReadFileTool
 from agent.tools.registry import ToolRegistry
 from agent.tools.session import ReadSessionArtifactTool
+from agent.tools.shell import RunCommandTool
 
 
 class FilesystemToolTests(unittest.TestCase):
@@ -43,13 +46,42 @@ class FilesystemToolTests(unittest.TestCase):
     def test_read_file_truncates_oversized_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
-            (workspace / "long.txt").write_text("x" * 100, encoding="utf-8")
-            context = _context(workspace, max_output_chars=30)
+            (workspace / "long.txt").write_text("x" * 200, encoding="utf-8")
+            context = _context(workspace, max_output_chars=100)
 
             result = ReadFileTool().execute({"path": "long.txt"}, context)
 
             self.assertTrue(result.success)
-            self.assertLessEqual(len(result.output), 30)
+            self.assertLessEqual(len(result.output), 100)
+            self.assertIn("file exceeds output limit", result.output)
+
+    def test_list_files_stops_after_a_bounded_entry_prefix(self) -> None:
+        """A dense directory cannot build an unbounded in-memory listing."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            for index in range(101):
+                (workspace / f"entry-{index:03d}.txt").write_text("", encoding="utf-8")
+
+            result = ListFilesTool().execute({"path": "."}, _context(workspace, max_output_chars=100))
+
+        self.assertTrue(result.success)
+        self.assertLessEqual(len(result.output), 100)
+        self.assertIn("truncated", result.output)
+
+    def test_command_output_is_drained_without_retaining_the_full_stream(self) -> None:
+        """A noisy subprocess must leave only the configured output prefix in memory."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            result = RunCommandTool(sandbox=_PassthroughSandbox()).execute(
+                {"command": [sys.executable, "-c", "print('x' * 250000)"]},
+                _context(workspace, max_output_chars=200),
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertLessEqual(len(result.output), 200)
+        self.assertIn("truncated", result.output)
 
     def test_list_files_empty_path_safely_defaults_to_workspace_root(self) -> None:
         """A common model shorthand lists the root without weakening other path tools."""
@@ -119,3 +151,10 @@ class _ArtifactReader:
     ) -> tuple[str, dict[str, object]]:
         self.requests.append((artifact_id, offset, max_chars))
         return "abcdef"[offset : offset + max_chars], {"artifact_id": artifact_id}
+
+
+class _PassthroughSandbox:
+    """Test double that exposes command-output handling without host isolation setup."""
+
+    def prepare(self, command: list[str], workspace: Path) -> SandboxInvocation:
+        return SandboxInvocation(tuple(command), {"execution_scope": "test"})

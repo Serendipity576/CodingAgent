@@ -6,10 +6,41 @@ from collections.abc import Mapping
 import os
 import signal
 import subprocess
+from threading import Thread
 from time import monotonic
+from typing import TextIO
 
 from agent.sandbox import BubblewrapSandbox, CommandSandbox, SandboxUnavailableError
-from agent.tools.base import ToolContext, ToolError, ToolResult, truncate_text
+from agent.tools.base import ToolContext, ToolError, ToolResult
+
+
+_STREAM_READ_CHARS = 4_096
+
+
+class _BoundedStream:
+    """Retain only a prefix while counting the complete stream length."""
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self._parts: list[str] = []
+        self._stored_chars = 0
+        self.total_chars = 0
+
+    def append(self, text: str) -> None:
+        """Count all text but keep no more than the configured visible prefix."""
+
+        self.total_chars += len(text)
+        remaining = self._limit - self._stored_chars
+        if remaining > 0:
+            retained = text[:remaining]
+            self._parts.append(retained)
+            self._stored_chars += len(retained)
+
+    @property
+    def prefix(self) -> str:
+        """Return the bounded prefix collected by the reader thread."""
+
+        return "".join(self._parts)
 
 
 class RunCommandTool:
@@ -70,10 +101,12 @@ class RunCommandTool:
                 f"could not start sandboxed command: {error}", metadata=invocation.metadata
             )
 
+        stdout, stderr, readers = _start_output_readers(process, context.limits.max_output_chars)
         started_at = monotonic()
         while True:
             if context.cancelled is not None and context.cancelled.is_set():
-                stdout, stderr = _stop_process(process)
+                _stop_process(process)
+                _finish_output_readers(process, readers)
                 return ToolResult.failed(
                     "command cancelled",
                     _command_output(
@@ -87,14 +120,16 @@ class RunCommandTool:
             elapsed = monotonic() - started_at
             remaining = context.limits.command_timeout_seconds - elapsed
             if remaining <= 0:
-                stdout, stderr = _stop_process(process)
+                _stop_process(process)
+                _finish_output_readers(process, readers)
                 return _timeout_result(stdout, stderr, context, invocation.metadata)
             try:
-                stdout, stderr = process.communicate(timeout=min(0.1, remaining))
+                process.wait(timeout=min(0.1, remaining))
                 break
             except subprocess.TimeoutExpired:
                 continue
 
+        _finish_output_readers(process, readers)
         output = _command_output(
             stdout=stdout,
             stderr=stderr,
@@ -113,8 +148,8 @@ class RunCommandTool:
 
 
 def _timeout_result(
-    stdout: str,
-    stderr: str,
+    stdout: _BoundedStream,
+    stderr: _BoundedStream,
     context: ToolContext,
     metadata: Mapping[str, object],
 ) -> ToolResult:
@@ -131,16 +166,53 @@ def _timeout_result(
     )
 
 
-def _stop_process(process: subprocess.Popen[str]) -> tuple[str, str]:
-    """Terminate a command and its children, then collect final captured output."""
+def _start_output_readers(
+    process: subprocess.Popen[str], limit: int
+) -> tuple[_BoundedStream, _BoundedStream, tuple[Thread, Thread]]:
+    """Drain both pipes concurrently so retained output never grows unbounded."""
+
+    stdout = _BoundedStream(limit)
+    stderr = _BoundedStream(limit)
+    if process.stdout is None or process.stderr is None:  # Defensive Popen contract check.
+        raise RuntimeError("command output pipes were not configured")
+    readers = (
+        Thread(target=_drain_stream, args=(process.stdout, stdout), daemon=True),
+        Thread(target=_drain_stream, args=(process.stderr, stderr), daemon=True),
+    )
+    for reader in readers:
+        reader.start()
+    return stdout, stderr, readers
+
+
+def _drain_stream(stream: TextIO, captured: _BoundedStream) -> None:
+    """Consume a process pipe without retaining text beyond its output budget."""
+
+    while chunk := stream.read(_STREAM_READ_CHARS):
+        captured.append(chunk)
+
+
+def _finish_output_readers(
+    process: subprocess.Popen[str], readers: tuple[Thread, Thread]
+) -> None:
+    """Join readers and close parent pipe handles once the child has exited."""
+
+    for reader in readers:
+        reader.join()
+    for stream in (process.stdout, process.stderr):
+        if stream is not None:
+            stream.close()
+
+
+def _stop_process(process: subprocess.Popen[str]) -> None:
+    """Terminate a command and its children before the reader threads are joined."""
 
     if process.poll() is None:
         _signal_process_group(process, signal.SIGTERM)
     try:
-        return process.communicate(timeout=2)
+        process.wait(timeout=2)
     except subprocess.TimeoutExpired:
         _signal_process_group(process, signal.SIGKILL)
-        return process.communicate()
+        process.wait()
 
 
 def _signal_process_group(process: subprocess.Popen[str], signal_number: int) -> None:
@@ -166,12 +238,29 @@ def _command_argument(arguments: Mapping[str, object]) -> list[str]:
     return command
 
 
-def _command_output(*, stdout: str, stderr: str, status: str, limit: int) -> str:
-    """Label streams so the model can distinguish test failures from output."""
+def _command_output(
+    *, stdout: _BoundedStream, stderr: _BoundedStream, status: str, limit: int
+) -> str:
+    """Render bounded stream prefixes with an accurate combined-size truncation marker."""
 
     sections = [status]
-    if stdout:
-        sections.extend(("stdout:", stdout))
-    if stderr:
-        sections.extend(("stderr:", stderr))
-    return truncate_text("\n".join(sections), limit)
+    total_chars = len(status)
+    if stdout.total_chars:
+        sections.extend(("stdout:", stdout.prefix))
+        total_chars += len("\nstdout:\n") + stdout.total_chars
+    if stderr.total_chars:
+        sections.extend(("stderr:", stderr.prefix))
+        total_chars += len("\nstderr:\n") + stderr.total_chars
+    visible = "\n".join(sections)
+    return _truncate_captured_text(visible, total_chars, limit)
+
+
+def _truncate_captured_text(visible: str, total_chars: int, limit: int) -> str:
+    """Keep the response within ``limit`` even when only stream prefixes are retained."""
+
+    if total_chars <= limit:
+        return visible
+    marker = f"\n... [truncated {total_chars - limit} characters]"
+    if limit <= len(marker):
+        return visible[:limit]
+    return f"{visible[: limit - len(marker)]}{marker}"

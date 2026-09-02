@@ -141,7 +141,7 @@ provider, API, endpoint, model, or generated-token settings as arguments.
 | API key | `CODING_AGENT_API_KEY` in `.env` | Not set; required for a task |
 | Base URL | `CODING_AGENT_BASE_URL` in `.env` | Not set; required for a task |
 | Maximum generated tokens | `CODING_AGENT_MAX_OUTPUT_TOKENS` in `.env` | Not set |
-| Maximum steps | `CODING_AGENT_MAX_STEPS` | `20` |
+| Maximum steps | `CODING_AGENT_MAX_STEPS` | `200` |
 | Command timeout | `CODING_AGENT_COMMAND_TIMEOUT_SECONDS` | `60` seconds |
 | Tool output limit | `CODING_AGENT_MAX_OUTPUT_CHARS` | `20000` characters |
 | Task timeout | `CODING_AGENT_MAX_TASK_SECONDS` | `900` seconds |
