@@ -1,155 +1,88 @@
 # Coding Agent
 
-A coding agent with workspace-bounded local tools, deterministic policy checks, and audit logs. The system design follows one rule: the LLM proposes actions; application code decides whether they may execute.
+一个本地运行的编程智能体：LLM 只负责分析任务和提出工具调用，文件访问、命令执行与高风险操作均由确定性策略控制。
 
-## Current status
+## 核心能力
 
-P4 (security tests and demonstration) and P6 (persistent conversations and the local Web interface) are complete. The Agent gates every tool call through a deterministic policy, constrains filesystem access to the workspace, protects common credential paths, records structured audit events, and includes a reproducible prompt-injection demonstration.
+- 读取、修改 workspace 内的文件，运行本地命令；
+- 支持单任务、多轮终端对话和本地 Web 会话；
+- 对话历史、上下文摘要、审计记录和 Trace 均保存在本地；
+- 路径越界、敏感文件和关键危险命令直接拒绝；
+- 高风险调用需逐次人工批准，命令默认运行在无网络的 Bubblewrap 沙箱中；
+- Web 页面可查看会话、执行进度、脱敏后的模型请求/响应及工具详情。
 
-## Quick start
+## 安装
 
-Requires Python 3.10 or newer.
+要求 Python 3.10+；需要执行本地命令时还需要 Linux、`bwrap` 和可用的用户命名空间。
 
 ```bash
-python -m pip install .
-coding-agent --help
-coding-agent --workspace . --print-config
-python -m unittest discover -s tests -t .
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
 ```
 
-`--print-config` never prints the API key. It is only a startup check; it does not call an LLM or execute any local tool.
+在项目根目录创建未提交的 `.env`：
 
-To run a task, put compatible Responses connection fields in an untracked `.env`
-file in the directory where you run the command:
-
-```bash
-cat > .env <<'EOF'
+```dotenv
+CODING_AGENT_PROVIDER="responses"
 CODING_AGENT_API_KEY="your_api_key"
 CODING_AGENT_BASE_URL="https://llm.example.com/v1"
 CODING_AGENT_MODEL="compatible-model"
-CODING_AGENT_PROVIDER="responses"
-CODING_AGENT_MAX_OUTPUT_TOKENS="2048"
-EOF'
-
-coding-agent \
-  --workspace /path/to/project \
-  --task "Fix the failing tests."
+CODING_AGENT_MAX_OUTPUT_TOKENS="128000"
 ```
 
-Every endpoint uses the same client-owned, stateless transcript: the initial task, original response items, and tool outputs are resubmitted on each turn. The client never sends `previous_response_id` or creates a server-side conversation. This follows DeepSeek's [Responses API compatibility guide](https://api-docs.deepseek.com/guides/responses_api/) and OpenAI's [stateless Responses guidance](https://developers.openai.com/api/reference/cli/resources/responses/methods/create).
+支持 `openai`、`deepseek` 和通用 `responses` 适配器；服务必须兼容 Responses API 和自定义函数工具调用。API Key 只从本地 `.env` 读取。
 
-Compatibility requires the service to support the OpenAI Responses API with `input` items and custom function tools. A service that implements only the legacy Chat Completions API is outside this interface. The CLI never asks for a provider name: `.env` selects the internal adapter with `CODING_AGENT_PROVIDER`, while `responses` uses the shared request format for other compatible endpoints.
+## 使用
 
-The model may use `list_files`, `read_file`, `apply_patch`, and `run_command`. `apply_patch` replaces one exact, unique text fragment; `run_command` accepts an executable and arguments rather than shell syntax.
+执行单个任务：
 
-## Persistent conversations
+```bash
+coding-agent --workspace /path/to/project --task "your task"
+```
 
-`--task` runs one user turn. It can contain multiple model/tool exchanges, but it ends once the model returns a final message.
-
-Start a terminal conversation to send several user messages through one locally held LLM transcript:
+启动终端多轮对话：
 
 ```bash
 coding-agent chat --workspace /path/to/project
 ```
 
-Terminal commands are `/help`, `/new`, `/sessions`, `/open <id>`, `/status`, `/cancel`, and `/quit`. `/new` creates a fresh local transcript; `/sessions` lists the workspace's saved sessions; `/open` resumes one using an unambiguous id prefix.
-
-Each workspace stores its sessions in `.agent/conversations/sessions.sqlite3`. The database contains the client-owned model transcript, session metadata, and browser-safe event journal, but never the API key. On POSIX systems it is created with owner-only permissions and Agent tools are denied access to `.agent`. It is local runtime data, is ignored by Git, and should be backed up or deleted only deliberately. A turn that was active during a process restart is marked **interrupted**; the Agent never reruns its model or tool calls automatically.
-
-Start the local Web interface:
+启动本地 Web 页面：
 
 ```bash
 coding-agent serve --workspace /path/to/project
 ```
 
-Open `http://127.0.0.1:8765`. This is a React workbench with a session sidebar, typed event timeline, collapsible tool cards, execution summary, cancellation controls, high-risk approval dialog, and explicit local-session deletion. It communicates with the local server through REST and server-sent events; it never receives the API key or provider reasoning data. The server rejects non-loopback hosts.
+打开 `http://127.0.0.1:8765`。服务仅监听 loopback 地址；同一 workspace 的 Agent 轮次串行执行。会话数据保存在 workspace 的 `.agent/conversations/`。
 
-### Web frontend development
+## 安全边界
 
-The production bundle is served from `src/agent/web/static/` and is included in
-the Python package. To rebuild it after changing the React source, use Node.js
-20.19 or later:
+每次工具调用都会得到 `ALLOW`、`REQUIRE_APPROVAL` 或 `DENY` 决策：
+
+- `ALLOW`：常规 workspace 读取、修改和测试；
+- `REQUIRE_APPROVAL`：删除、依赖管理、网络能力、破坏性 Git、解释器脚本及未知命令；
+- `DENY`：workspace 越界、符号链接逃逸、`.env`、私钥、凭据目录、`sudo`、关机和格式化等操作。
+
+命令在 Bubblewrap 沙箱中执行：网络关闭、环境变量最小化、HOME/TMP 隔离，并遮蔽 workspace 内的敏感路径。沙箱不可用时命令失败关闭，不会回退到宿主机执行。
+
+## 可观测性与上下文
+
+任务审计日志写入 `.agent/logs/`，记录工具、策略、风险、耗时和结果摘要，不保存文件正文、补丁正文或工具输出。Web 会话额外保存按轮次组织的 Trace；模型请求和响应仅在用户主动打开详情时以脱敏、截断后的形式提供。
+
+完整对话转录由客户端本地维护，不使用服务端会话。长会话保留原始历史，同时使用本地摘要和工具输出工件构造受预算约束的模型上下文。
+
+## 验证与开发
+
+运行完整测试：
+
+```bash
+python -m unittest discover -s tests -t .
+```
+
+前端源码位于 `frontend/`。修改前端后，使用 Node.js 20.19+ 重新构建并提交生成的静态资源：
 
 ```bash
 cd frontend
 npm ci
 npm run build
 ```
-
-`node_modules/` is local-only. Commit the React source, `package-lock.json`, and
-the regenerated `src/agent/web/static/` bundle so `coding-agent serve` works
-after a normal Python installation without a separate Node.js step.
-
-For hot-reload development, start `coding-agent serve` in one terminal and run
-`npm run dev` in another; then open `http://127.0.0.1:5173/static/`. Vite proxies
-only `/api` to the loopback FastAPI service.
-
-One workspace executes one Agent turn at a time, even across several browser conversations. Sessions remain available until explicit deletion, while their complete raw transcript remains local. Each model request uses a separately selected, budgeted context view; completed older history can be summarized without losing the original record. Completed sessions can be resumed after restart.
-
-## Safety boundary
-
-Every tool request receives one deterministic decision:
-
-- `ALLOW`: standard reads, tests, and workspace edits execute automatically;
-- `REQUIRE_APPROVAL`: deletion, dependency management, network-capable commands, destructive Git operations, and unknown executables require an interactive `y`/`yes` confirmation;
-- `DENY`: workspace escape, sensitive files, `sudo`, shutdown/reboot, formatting, and similar critical actions never execute.
-
-The path guard resolves real paths before checking containment, so `../`, absolute escape, and symlink escape are rejected. Common credential paths such as `.env`, private keys, `credentials`, `secrets`, and the Agent's own `.agent` state are also denied. The policy is rule-based rather than a complete static analyzer. Every `run_command` call additionally starts in a local Bubblewrap sandbox: it has no network, a sanitized environment, an isolated home and temporary directory, and no access to protected workspace paths or host directories outside the workspace. This default executor requires Linux with the `bwrap` command and usable user namespaces. If either is unavailable, the command fails explicitly; the Agent never silently falls back to an unsandboxed host process. The current sandbox still gives commands write access to the workspace so normal test and build workflows remain compatible.
-
-In Web mode, `REQUIRE_APPROVAL` pauses the worker and shows one browser prompt containing the exact tool, safe argument summary, risk, and reason. Approval applies only to that one call; rejection, timeout, cancellation, and an unknown approval id deny it. Cancelling a turn also stops an active local command and its POSIX child process group where supported.
-
-## Audit and change summary
-
-Each task writes append-only JSONL events to `.agent/logs/<task-id>.jsonl`. Events record the task, tool name, policy decision, risk, duration, exit metadata, and the final outcome. File bodies, patch text, and tool output are intentionally excluded from the audit log.
-
-The final CLI JSON includes a task summary: changed-file count and paths from successful `apply_patch` calls, per-file added/removed-line counts, the latest recognized test result, blocked actions, and approved high-risk actions.
-
-Web conversations additionally keep a private, per-turn runtime trace in the local session database. It groups model exchanges and their tool calls, including duration, policy decision, completion state, terminal result, and context-selection facts. The normal trace list and SSE updates never contain model request/response bodies. Opening one trace item in the local Web page requests its sanitized request or response on demand; API keys, authentication headers, common credential fields, and common secret patterns are redacted, oversized text is marked as truncated, and encrypted model reasoning is not recorded.
-
-The context manager uses a fixed DeepSeek-V4-Flash baseline: a 1,048,576-token window, a 393,216-token output reserve, and a local safety margin. These are application defaults rather than environment variables. It preserves raw history in SQLite, stores structured summaries separately, retains oversized tool output locally as conversation artifacts, and lets the Agent read a referenced artifact in bounded chunks when needed.
-
-## Security verification and demo
-
-Run the complete automated suite:
-
-```bash
-python -m unittest discover -s tests -t .
-```
-
-The suite covers workspace escape (`../`, absolute paths, and symlinks), sensitive paths, dangerous commands, approval handling, command timeout, output truncation, invalid tool arguments, repeated failures, and maximum-step termination.
-
-Run the offline prompt-injection demonstration (no API key or network request):
-
-```bash
-python examples/prompt_injection_demo/run_demo.py
-```
-
-It copies a deliberately malicious example repository into a temporary workspace. Its scripted model reads the malicious README, then attempts to read `.env`; the policy denies that request. The same run then diagnoses the failing test, patches `app.py`, and reruns the test successfully. Expected final fields are `blocked_actions: 1`, `tests: "passed"`, and `modified_files: ["app.py"]`. The script normally completes in a few seconds and removes its temporary workspace afterwards.
-
-This is a deterministic policy demonstration, not evidence that every model will resist prompt injection. Repository text and tool output remain untrusted; the application policy is the enforcement boundary.
-
-## Configuration
-
-LLM connection settings are read from `.env` only. The main CLI does not accept
-provider, API, endpoint, model, or generated-token settings as arguments.
-
-| Setting | Configuration source | Default |
-| --- | --- | --- |
-| Workspace | `--workspace` or `CODING_AGENT_WORKSPACE` | Current directory |
-| Provider | `CODING_AGENT_PROVIDER` in `.env` | Not set; required for a task |
-| Model | `CODING_AGENT_MODEL` in `.env` | Not set; required for a task |
-| API key | `CODING_AGENT_API_KEY` in `.env` | Not set; required for a task |
-| Base URL | `CODING_AGENT_BASE_URL` in `.env` | Not set; required for a task |
-| Maximum generated tokens | `CODING_AGENT_MAX_OUTPUT_TOKENS` in `.env` | Not set |
-| Maximum steps | `CODING_AGENT_MAX_STEPS` | `200` |
-| Command timeout | `CODING_AGENT_COMMAND_TIMEOUT_SECONDS` | `60` seconds |
-| Tool output limit | `CODING_AGENT_MAX_OUTPUT_CHARS` | `20000` characters |
-| Task timeout | `CODING_AGENT_MAX_TASK_SECONDS` | `900` seconds |
-| Repeated tool failure limit | `CODING_AGENT_MAX_CONSECUTIVE_TOOL_FAILURES` | `2` |
-| Local working-context baseline | Fixed in application code | DeepSeek-V4-Flash: 1,048,576-token window / 393,216-token output reserve |
-
-Store `CODING_AGENT_API_KEY` in the untracked local `.env` file; never commit it. The loader reads `CODING_AGENT_PROVIDER`, `CODING_AGENT_API_KEY`, `CODING_AGENT_BASE_URL`, `CODING_AGENT_MODEL`, and the optional `CODING_AGENT_MAX_OUTPUT_TOKENS` as literal values. It does not expand or execute its contents. Set `CODING_AGENT_PROVIDER` to `openai`, `deepseek`, or `responses`; the final value selects the corresponding internal adapter without inferring it from the URL.
-
-## Development plan
-
-Scope, phase boundaries, acceptance criteria, and progress updates live in [实施计划与进度.md](实施计划与进度.md). The detailed architecture is in [项目启动文档.md](项目启动文档.md).
