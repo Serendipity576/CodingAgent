@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import replace
+import json
 
 from agent.llm.models import ToolCall
 from agent.security.approval import ApprovalHandler, DenyAllApproval
@@ -91,17 +92,53 @@ class ToolRegistry:
 
     @staticmethod
     def _normalize_call(call: ToolCall) -> tuple[ToolCall, dict[str, object]]:
+        """Normalize documented, unambiguous shorthand before policy evaluation."""
+
+        if call.arguments is None:
+            return call, {}
+        if call.name == "list_files":
+            return ToolRegistry._normalize_list_path(call)
+        if call.name == "run_command":
+            return ToolRegistry._normalize_command_array(call)
+        return call, {}
+
+    @staticmethod
+    def _normalize_list_path(call: ToolCall) -> tuple[ToolCall, dict[str, object]]:
         """Treat an empty list-files path as the safe, documented workspace root."""
 
-        if call.name != "list_files" or call.arguments is None:
-            return call, {}
-        path = call.arguments.get("path")
+        path = call.arguments.get("path") if call.arguments is not None else None
         if path is not None and (not isinstance(path, str) or path.strip()):
             return call, {}
         normalized_arguments = {**call.arguments, "path": "."}
         return (
             replace(call, arguments=normalized_arguments),
             {"normalization": {"path": ".", "reason": "empty_path_means_workspace_root"}},
+        )
+
+    @staticmethod
+    def _normalize_command_array(call: ToolCall) -> tuple[ToolCall, dict[str, object]]:
+        """Accept only a JSON-encoded string array; never parse shell command text."""
+
+        command = call.arguments.get("command") if call.arguments is not None else None
+        if not isinstance(command, str):
+            return call, {}
+        try:
+            parsed = json.loads(command)
+        except json.JSONDecodeError:
+            return call, {}
+        if not isinstance(parsed, list) or not parsed or any(
+            not isinstance(part, str) or not part for part in parsed
+        ):
+            return call, {}
+        normalized_arguments = {**call.arguments, "command": parsed}
+        return (
+            replace(call, arguments=normalized_arguments),
+            {
+                "normalization": {
+                    "command": "parsed_json_string_array",
+                    "reason": "serialized_array_from_model",
+                }
+            },
         )
 
     @staticmethod

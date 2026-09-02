@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -82,6 +83,25 @@ class FilesystemToolTests(unittest.TestCase):
         self.assertTrue(result.success, result.error)
         self.assertLessEqual(len(result.output), 200)
         self.assertIn("truncated", result.output)
+
+    def test_run_command_normalizes_a_serialized_json_array(self) -> None:
+        """A common model encoding error can recover without accepting shell text."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            command = json.dumps([sys.executable, "-m", "unittest", "-q"])
+            result = ToolRegistry(
+                [RunCommandTool(sandbox=_PassthroughSandbox())],
+                policy=PolicyEngine(workspace),
+            ).execute(
+                ToolCall(call_id="call-1", name="run_command", arguments={"command": command}),
+                _context(workspace),
+            )
+
+        self.assertTrue(result.success, result.error)
+        self.assertEqual(
+            result.metadata["normalization"]["command"], "parsed_json_string_array"
+        )
 
     def test_list_files_empty_path_safely_defaults_to_workspace_root(self) -> None:
         """A common model shorthand lists the root without weakening other path tools."""
