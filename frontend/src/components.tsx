@@ -160,7 +160,6 @@ export function Sidebar({
           })
         )}
       </nav>
-      <p className="local-only">仅本机访问<br />会话数据保留在 workspace</p>
     </aside>
   );
 }
@@ -725,13 +724,26 @@ interface ComposerProps {
   value: string;
   disabled: boolean;
   focusKey: string | null;
+  running: boolean;
+  cancelling: boolean;
   submitting: boolean;
   onChange: (value: string) => void;
+  onCancel: () => void;
   onSubmit: () => void;
 }
 
 /** Provide keyboard-friendly task entry without allowing a blank submission. */
-export function Composer({ value, disabled, focusKey, submitting, onChange, onSubmit }: ComposerProps) {
+export function Composer({
+  value,
+  disabled,
+  focusKey,
+  running,
+  cancelling,
+  submitting,
+  onChange,
+  onCancel,
+  onSubmit,
+}: ComposerProps) {
   const textarea = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -777,6 +789,18 @@ export function Composer({ value, disabled, focusKey, submitting, onChange, onSu
           rows={1}
           value={value}
         />
+        {running && (
+          <button
+            aria-label="停止生成"
+            className="composer-cancel"
+            disabled={cancelling}
+            type="button"
+            onClick={onCancel}
+          >
+            <Icon name="pause" size={15} />
+            <span>{cancelling ? "正在停止" : "停止生成"}</span>
+          </button>
+        )}
         <button
           aria-label="发送消息"
           className="composer-send"
@@ -799,15 +823,12 @@ interface InspectorProps {
   traces: TurnTrace[];
   session: ConversationSnapshot | null;
   connection: "connecting" | "connected" | "reconnecting" | "error";
-  onCancel: () => void;
-  cancelling: boolean;
   onOpenActivity: () => void;
   open: boolean;
 }
 
 /** Present session limits, safe execution details, and result summaries without LLM history. */
-export function Inspector({ config, traces, session, connection, onCancel, cancelling, onOpenActivity, open }: InspectorProps) {
-  const isRunning = session?.state === "running";
+export function Inspector({ config, traces, session, connection, onOpenActivity, open }: InspectorProps) {
   return (
     <aside aria-hidden={!open} className={`inspector ${open ? "open" : "collapsed"}`} inert={!open}>
       <div className="inspector-title-row">
@@ -832,11 +853,6 @@ export function Inspector({ config, traces, session, connection, onCancel, cance
             <div><dt>本地摘要</dt><dd>v{session.context.summary_version ?? 0} · {session.context.artifact_count ?? 0} 工件</dd></div>
             <div><dt>最近结果</dt><dd>{session.latest_status ?? "尚未执行"}</dd></div>
           </dl>
-          {isRunning && (
-            <button className="cancel-button" type="button" onClick={onCancel} disabled={cancelling}>
-              <Icon name="pause" /> {cancelling ? "正在取消" : "取消当前任务"}
-            </button>
-          )}
           <ActivityLog traces={traces} onOpen={onOpenActivity} />
           {session.summary && <Summary summary={session.summary} />}
         </>
@@ -848,7 +864,6 @@ export function Inspector({ config, traces, session, connection, onCancel, cance
         <dl>
           <div><dt>服务商</dt><dd>{config?.provider ?? "未配置"}</dd></div>
           <div><dt>模型</dt><dd title={config?.model ?? undefined}>{config?.model ?? "未配置"}</dd></div>
-          <div><dt>API Key</dt><dd>{config?.api_key_configured ? "已配置（不显示）" : "未配置"}</dd></div>
         </dl>
       </section>
     </aside>

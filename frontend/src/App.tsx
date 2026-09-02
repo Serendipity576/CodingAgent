@@ -667,9 +667,6 @@ export default function App() {
             >
               <Icon name="menu" size={18} />
             </button>
-            {activeSession && activeSession.state !== "idle" && (
-              <span className={`header-state state-${activeSession.state}`}>{stateLabel(activeSession.state)}</span>
-            )}
             {activeSession && !followingLatest && (
               <button className="latest-button" type="button" onClick={() => scrollToLatest()}>
                 回到最新
@@ -708,19 +705,20 @@ export default function App() {
           session={activeSession}
         />
         <Composer
+          cancelling={cancelling}
           disabled={composerDisabled}
           focusKey={activeId}
           onChange={updateDraft}
+          onCancel={() => void cancel()}
           onSubmit={() => void sendMessage()}
+          running={activeSession?.state === "running"}
           submitting={submitting}
           value={message}
         />
       </section>
       <Inspector
-        cancelling={cancelling}
         config={config}
         connection={connection}
-        onCancel={() => void cancel()}
         onOpenActivity={() => void openActivityDialog()}
         open={inspectorOpen}
         session={activeSession}
