@@ -84,7 +84,7 @@ For hot-reload development, start `coding-agent serve` in one terminal and run
 `npm run dev` in another; then open `http://127.0.0.1:5173/static/`. Vite proxies
 only `/api` to the loopback FastAPI service.
 
-One workspace executes one Agent turn at a time, even across several browser conversations. Sessions have a turn limit, while their complete raw transcript remains local until explicit deletion. Each model request uses a separately selected, budgeted context view; completed older history can be summarized without losing the original record. Completed sessions can be resumed after restart.
+One workspace executes one Agent turn at a time, even across several browser conversations. Sessions remain available until explicit deletion, while their complete raw transcript remains local. Each model request uses a separately selected, budgeted context view; completed older history can be summarized without losing the original record. Completed sessions can be resumed after restart.
 
 ## Safety boundary
 
@@ -146,7 +146,6 @@ provider, API, endpoint, model, or generated-token settings as arguments.
 | Tool output limit | `CODING_AGENT_MAX_OUTPUT_CHARS` | `20000` characters |
 | Task timeout | `CODING_AGENT_MAX_TASK_SECONDS` | `900` seconds |
 | Repeated tool failure limit | `CODING_AGENT_MAX_CONSECUTIVE_TOOL_FAILURES` | `2` |
-| Conversation turn limit | `CODING_AGENT_MAX_CONVERSATION_TURNS` | `50` |
 | Local working-context baseline | Fixed in application code | DeepSeek-V4-Flash: 1,048,576-token window / 393,216-token output reserve |
 
 Store `CODING_AGENT_API_KEY` in the untracked local `.env` file; never commit it. The loader reads `CODING_AGENT_PROVIDER`, `CODING_AGENT_API_KEY`, `CODING_AGENT_BASE_URL`, `CODING_AGENT_MODEL`, and the optional `CODING_AGENT_MAX_OUTPUT_TOKENS` as literal values. It does not expand or execute its contents. Set `CODING_AGENT_PROVIDER` to `openai`, `deepseek`, or `responses`; the final value selects the corresponding internal adapter without inferring it from the URL.

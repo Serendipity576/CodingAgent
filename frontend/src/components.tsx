@@ -143,7 +143,7 @@ export function Sidebar({
                     <StateDot state={session.state} />
                   </span>
                   <span className="conversation-item-bottom">
-                    {stateLabel(session.state)} · {session.turn_count}/{session.max_turns} 轮
+                    {stateLabel(session.state)}
                   </span>
                 </button>
                 <button
@@ -365,7 +365,7 @@ export function TurnOutcomeNotice({ maxSteps, onOpenActivity, session }: TurnOut
 /** Identify one terminal result without storing task text or conversation history. */
 function dismissedOutcomeKey(session: ConversationSnapshot): string | null {
   return session.latest_status
-    ? `${session.conversation_id}:${session.turn_count}:${session.latest_status}`
+    ? `${session.conversation_id}:${session.latest_event_sequence}:${session.latest_status}`
     : null;
 }
 
@@ -826,7 +826,6 @@ export function Inspector({ config, traces, session, connection, onCancel, cance
             <StateDot state={session.state} />
           </section>
           <dl className="metrics">
-            <div><dt>已处理轮次</dt><dd>{session.turn_count} / {session.max_turns}</dd></div>
             <div><dt>消息队列</dt><dd>{session.queued_messages}</dd></div>
             <div><dt>原始历史</dt><dd>{session.history_items} 项</dd></div>
             <div><dt>请求上下文</dt><dd>{formatTokenCount(session.context.estimated_input_tokens)} / {formatTokenCount(session.context.input_budget_tokens)}</dd></div>

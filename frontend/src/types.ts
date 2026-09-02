@@ -22,8 +22,7 @@ export interface ConversationSnapshot {
   conversation_id: string;
   workspace: string;
   state: ConversationState;
-  turn_count: number;
-  max_turns: number;
+  latest_event_sequence: number;
   queued_messages: number;
   history_items: number;
   max_history_items: number;
@@ -79,7 +78,7 @@ export interface TraceItemDetail extends TraceItem {
   response?: unknown;
 }
 
-export type ConversationState = "idle" | "running" | "interrupted" | "closed" | "limit_reached";
+export type ConversationState = "idle" | "running" | "interrupted" | "closed";
 
 export interface ConversationEvent {
   sequence: number;
@@ -101,7 +100,6 @@ export interface PublicConfig {
     max_output_chars: number;
     max_task_seconds: number;
     max_consecutive_tool_failures: number;
-    max_conversation_turns: number;
     max_history_items: number;
   };
 }

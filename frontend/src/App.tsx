@@ -41,13 +41,13 @@ const SSE_EVENT_NAMES = [
   "conversation_interrupted",
   "approval_required",
   "approval_resolved",
-  "conversation_limit_reached",
   "turn_cancel_requested",
   "conversation_closed",
 ] as const;
 
 const LAST_ACTIVE_CONVERSATION_KEY = "coding-agent:last-active-conversation";
 const BACKGROUND_REFRESH_INTERVAL_MS = 5_000;
+const TRACE_REFRESH_DEBOUNCE_MS = 150;
 
 type ConnectionState = "connecting" | "connected" | "reconnecting" | "error";
 
@@ -127,6 +127,9 @@ export default function App() {
   const deletedConversationIds = useRef(new Set<string>());
   const followingLatestRef = useRef(true);
   const conversationStage = useRef<HTMLElement>(null);
+  const pendingTraceRefreshes = useRef(new Set<string>());
+  const traceRefreshTimers = useRef(new Map<string, number>());
+  const traceRefreshesInFlight = useRef(new Set<string>());
 
   const activeSession = sessions.find((session) => session.conversation_id === activeId) ?? null;
   const activeEvents = activeId ? eventsBySession[activeId] ?? [] : [];
@@ -157,6 +160,44 @@ export default function App() {
     }
     return traces;
   }, []);
+
+  /** Coalesce replayed trace updates so one session never issues a request per SSE event. */
+  const scheduleTraceRefresh = useCallback((conversationId: string) => {
+    pendingTraceRefreshes.current.add(conversationId);
+    if (
+      traceRefreshTimers.current.has(conversationId)
+      || traceRefreshesInFlight.current.has(conversationId)
+    ) {
+      return;
+    }
+
+    function startRefresh() {
+      traceRefreshTimers.current.delete(conversationId);
+      if (!pendingTraceRefreshes.current.delete(conversationId)) {
+        return;
+      }
+      traceRefreshesInFlight.current.add(conversationId);
+      void refreshTraces(conversationId)
+        .catch(() => undefined)
+        .finally(() => {
+          traceRefreshesInFlight.current.delete(conversationId);
+          if (
+            pendingTraceRefreshes.current.has(conversationId)
+            && !deletedConversationIds.current.has(conversationId)
+          ) {
+            traceRefreshTimers.current.set(
+              conversationId,
+              window.setTimeout(startRefresh, TRACE_REFRESH_DEBOUNCE_MS),
+            );
+          }
+        });
+    }
+
+    traceRefreshTimers.current.set(
+      conversationId,
+      window.setTimeout(startRefresh, TRACE_REFRESH_DEBOUNCE_MS),
+    );
+  }, [refreshTraces]);
 
   /** Refresh metadata only; history and provider internals never reach the browser. */
   const refreshSessions = useCallback(async () => {
@@ -361,7 +402,7 @@ export default function App() {
         void api.conversation(conversationId).then(updateSession).catch(() => undefined);
       }
       if (event.event === "trace_updated") {
-        void refreshTraces(conversationId).catch(() => undefined);
+        scheduleTraceRefresh(conversationId);
       }
     };
     for (const name of SSE_EVENT_NAMES) {
@@ -383,7 +424,17 @@ export default function App() {
       source.close();
       connectedStreams.current.delete(conversationId);
     };
-  }, [activeId, appendEvent, refreshTraces, updateSession]);
+  }, [activeId, appendEvent, scheduleTraceRefresh, updateSession]);
+
+  /** Cancel delayed trace refreshes when the React workbench unmounts. */
+  useEffect(() => () => {
+    for (const timer of traceRefreshTimers.current.values()) {
+      window.clearTimeout(timer);
+    }
+    traceRefreshTimers.current.clear();
+    pendingTraceRefreshes.current.clear();
+    traceRefreshesInFlight.current.clear();
+  }, []);
 
   /** Load the active trace on selection and after a browser refresh. */
   useEffect(() => {
@@ -576,7 +627,7 @@ export default function App() {
     return api.traceItem(activeId, turnId, itemId);
   }, [activeId]);
 
-  const composerDisabled = !activeSession || ["closed", "limit_reached"].includes(activeSession.state);
+  const composerDisabled = !activeSession || activeSession.state === "closed";
   return (
     <main className={`app-shell ${inspectorOpen ? "inspector-open" : "inspector-closed"}`}>
       <Sidebar
@@ -694,7 +745,6 @@ function shouldRefreshSnapshot(eventName: string): boolean {
     "context_compacted",
     "context_compaction_failed",
     "conversation_interrupted",
-    "conversation_limit_reached",
     "conversation_closed",
   ].includes(eventName);
 }

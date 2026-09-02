@@ -69,7 +69,7 @@ def run_chat(
 
         sequence = session.latest_event_sequence()
         if not session.submit(message):
-            write("Conversation is closed or reached its configured turn limit.")
+            write("Conversation is closed.")
             continue
         _print_turn_events(session, write, sequence=sequence)
 
@@ -84,7 +84,7 @@ def _initial_session(manager: ConversationManager) -> ConversationSession:
     """Open the newest resumable session, creating one only when none exist."""
 
     for snapshot in manager.snapshots():
-        if snapshot["state"] not in {"closed", "limit_reached"}:
+        if snapshot["state"] != "closed":
             restored = manager.get(str(snapshot["conversation_id"]))
             if restored is not None:
                 return restored
@@ -101,7 +101,7 @@ def _print_sessions(manager: ConversationManager, write: Callable[[str], None]) 
     for snapshot in snapshots:
         write(
             f"{str(snapshot['conversation_id'])[:8]} "
-            f"{snapshot['state']} {snapshot['turn_count']}/{snapshot['max_turns']} turns"
+            f"{snapshot['state']}"
         )
 
 

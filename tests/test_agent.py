@@ -120,6 +120,7 @@ class CodingAgentTests(unittest.TestCase):
             )
             self.assertIn("return left + right", (workspace / "app.py").read_text())
             self.assertEqual(llm.requests[0]["task"], "Fix the failing test.")
+            self.assertIn("默认使用中文回复", llm.requests[0]["instructions"])
             self.assertIsNone(llm.requests[1]["task"])
             self.assertEqual(len(llm.requests[1]["tool_outputs"]), 1)
             self.assertIsNotNone(result.summary)

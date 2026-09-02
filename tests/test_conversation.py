@@ -132,17 +132,22 @@ class ConversationTests(unittest.TestCase):
         events = [item.event for item in session.events_after(0, timeout_seconds=0)]
         self.assertIn("conversation_turn_finished", events)
 
-    def test_turn_limit_rejects_additional_messages(self) -> None:
+    def test_session_accepts_additional_messages_without_a_turn_cap(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
-            with patch("agent.conversation.build_llm_client", return_value=RecordingLLM()):
-                manager = ConversationManager(_settings(workspace), workspace, max_turns=1)
+            llm = RecordingLLM()
+            with patch("agent.conversation.build_llm_client", return_value=llm):
+                manager = ConversationManager(_settings(workspace), workspace)
                 session = manager.create()
-                self.assertTrue(session.submit("Only allowed message."))
+                self.assertTrue(session.submit("First message."))
                 _wait_for_finished_turn(session, 1)
-                self.assertFalse(session.submit("Rejected message."))
+                self.assertTrue(session.submit("Second message."))
+                _wait_for_finished_turn(session, 2)
+                self.assertTrue(session.submit("Third message."))
+                _wait_for_finished_turn(session, 3)
 
-        self.assertEqual(session.state, ConversationState.LIMIT_REACHED)
+        self.assertEqual(session.state, ConversationState.IDLE)
+        self.assertEqual(len(llm.requests), 3)
 
     def test_client_message_id_deduplicates_a_browser_retry(self) -> None:
         """A lost browser response must not enqueue an equivalent second turn."""
@@ -212,7 +217,6 @@ class ConversationTests(unittest.TestCase):
                 created_at=1.0,
                 state=ConversationState.RUNNING.value,
                 turn_count=1,
-                max_turns=4,
                 max_history_items=20,
                 transcript=(),
                 latest_result=None,
@@ -258,8 +262,8 @@ class ConversationTests(unittest.TestCase):
         self.assertIsNotNone(restored)
         self.assertEqual(restored_llm.restored_context_state, first_llm.context_state)
 
-    def test_store_migrates_existing_sessions_without_context_metadata(self) -> None:
-        """Older local databases gain the new column without losing their transcript."""
+    def test_legacy_limited_session_resumes_without_a_turn_cap(self) -> None:
+        """Older local databases remain writable and unblock capped sessions."""
 
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -281,16 +285,26 @@ class ConversationTests(unittest.TestCase):
                         latest_result_json TEXT
                     );
                     INSERT INTO conversations VALUES (
-                        'legacy-session', 1, 1, 'idle', 1, 4, 20, '[]', NULL
+                        'legacy-session', 1, 1, 'limit_reached', 1, 4, 20, '[]', NULL
                     );
                     """
                 )
 
             loaded = ConversationStore(workspace).load_conversations()
+            llm = RecordingLLM()
+            with patch("agent.conversation.build_llm_client", return_value=llm):
+                manager = ConversationManager(_settings(workspace), workspace)
+                session = manager.get("legacy-session")
+                self.assertIsNotNone(session)
+                assert session is not None
+                self.assertEqual(session.state, ConversationState.IDLE)
+                self.assertTrue(session.submit("Continue the old session."))
+                _wait_for_finished_turn(session, 2)
 
         self.assertEqual(len(loaded), 1)
         self.assertEqual(loaded[0].conversation_id, "legacy-session")
         self.assertEqual(loaded[0].context_state, {})
+        self.assertEqual(len(llm.requests), 1)
 
 
 def _wait_for_finished_turn(session: object, turn_id: int) -> None:

@@ -42,7 +42,6 @@ class StoredConversation:
     created_at: float
     state: str
     turn_count: int
-    max_turns: int
     max_history_items: int
     transcript: tuple[dict[str, object], ...]
     context_state: Mapping[str, object]
@@ -70,7 +69,6 @@ class ConversationStore:
                     updated_at REAL NOT NULL,
                     state TEXT NOT NULL,
                     turn_count INTEGER NOT NULL,
-                    max_turns INTEGER NOT NULL,
                     max_history_items INTEGER NOT NULL,
                     transcript_json TEXT NOT NULL,
                     context_state_json TEXT NOT NULL DEFAULT '{}',
@@ -101,6 +99,7 @@ class ConversationStore:
                 """
             )
             self._ensure_conversation_columns(connection)
+            self._has_legacy_max_turns = self._has_column(connection, "max_turns")
 
     @property
     def path(self) -> Path:
@@ -115,7 +114,6 @@ class ConversationStore:
         created_at: float,
         state: str,
         turn_count: int,
-        max_turns: int,
         max_history_items: int,
         transcript: Sequence[Mapping[str, object]],
         latest_result: Mapping[str, object] | None,
@@ -128,36 +126,67 @@ class ConversationStore:
         result_json = _json_text(dict(latest_result)) if latest_result is not None else None
         updated_at = time()
         with self._lock, self._connection() as connection:
-            connection.execute(
-                """
-                INSERT INTO conversations (
-                    conversation_id, created_at, updated_at, state, turn_count,
-                    max_turns, max_history_items, transcript_json, context_state_json,
-                    latest_result_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(conversation_id) DO UPDATE SET
-                    updated_at = excluded.updated_at,
-                    state = excluded.state,
-                    turn_count = excluded.turn_count,
-                    max_turns = excluded.max_turns,
-                    max_history_items = excluded.max_history_items,
-                    transcript_json = excluded.transcript_json,
-                    context_state_json = excluded.context_state_json,
-                    latest_result_json = excluded.latest_result_json
-                """,
-                (
-                    conversation_id,
-                    created_at,
-                    updated_at,
-                    state,
-                    turn_count,
-                    max_turns,
-                    max_history_items,
-                    transcript_json,
-                    context_state_json,
-                    result_json,
-                ),
-            )
+            if self._has_legacy_max_turns:
+                # Older databases require this non-null column. Keep an inert
+                # value for new rows without rebuilding user-owned storage.
+                connection.execute(
+                    """
+                    INSERT INTO conversations (
+                        conversation_id, created_at, updated_at, state, turn_count,
+                        max_turns, max_history_items, transcript_json, context_state_json,
+                        latest_result_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(conversation_id) DO UPDATE SET
+                        updated_at = excluded.updated_at,
+                        state = excluded.state,
+                        turn_count = excluded.turn_count,
+                        max_history_items = excluded.max_history_items,
+                        transcript_json = excluded.transcript_json,
+                        context_state_json = excluded.context_state_json,
+                        latest_result_json = excluded.latest_result_json
+                    """,
+                    (
+                        conversation_id,
+                        created_at,
+                        updated_at,
+                        state,
+                        turn_count,
+                        0,
+                        max_history_items,
+                        transcript_json,
+                        context_state_json,
+                        result_json,
+                    ),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO conversations (
+                        conversation_id, created_at, updated_at, state, turn_count,
+                        max_history_items, transcript_json, context_state_json,
+                        latest_result_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(conversation_id) DO UPDATE SET
+                        updated_at = excluded.updated_at,
+                        state = excluded.state,
+                        turn_count = excluded.turn_count,
+                        max_history_items = excluded.max_history_items,
+                        transcript_json = excluded.transcript_json,
+                        context_state_json = excluded.context_state_json,
+                        latest_result_json = excluded.latest_result_json
+                    """,
+                    (
+                        conversation_id,
+                        created_at,
+                        updated_at,
+                        state,
+                        turn_count,
+                        max_history_items,
+                        transcript_json,
+                        context_state_json,
+                        result_json,
+                    ),
+                )
 
     def append_event(
         self,
@@ -216,8 +245,8 @@ class ConversationStore:
         with self._lock, self._connection() as connection:
             rows = connection.execute(
                 """
-                SELECT conversation_id, created_at, state, turn_count, max_turns,
-                       max_history_items, transcript_json, context_state_json, latest_result_json
+                SELECT conversation_id, created_at, state, turn_count, max_history_items,
+                       transcript_json, context_state_json, latest_result_json
                 FROM conversations
                 ORDER BY updated_at DESC, created_at DESC
                 """
@@ -265,7 +294,6 @@ class ConversationStore:
                 created_at=_required_float(row["created_at"], "created timestamp"),
                 state=_required_text(row["state"], "conversation state"),
                 turn_count=_required_nonnegative_int(row["turn_count"], "turn count"),
-                max_turns=_required_positive_int(row["max_turns"], "maximum turns"),
                 max_history_items=_required_positive_int(
                     row["max_history_items"], "maximum history items"
                 ),
@@ -299,6 +327,15 @@ class ConversationStore:
             connection.execute(
                 "ALTER TABLE conversations ADD COLUMN context_state_json TEXT NOT NULL DEFAULT '{}'"
             )
+
+    @staticmethod
+    def _has_column(connection: sqlite3.Connection, name: str) -> bool:
+        """Return whether an older local schema still contains one column."""
+
+        return any(
+            row["name"] == name
+            for row in connection.execute("PRAGMA table_info(conversations)").fetchall()
+        )
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:

@@ -32,7 +32,6 @@ class ConversationState(str, Enum):
     RUNNING = "running"
     INTERRUPTED = "interrupted"
     CLOSED = "closed"
-    LIMIT_REACHED = "limit_reached"
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +75,6 @@ class ConversationSession:
         execution_lock: Lock,
         store: ConversationStore,
         approval_factory: ApprovalFactory | None = None,
-        max_turns: int | None = None,
         max_history_items: int | None = None,
         restored: StoredConversation | None = None,
     ) -> None:
@@ -84,7 +82,6 @@ class ConversationSession:
         self._settings = settings
         self._execution_lock = execution_lock
         self._store = store
-        self._max_turns = max_turns or settings.limits.max_conversation_turns
         self._max_history_items = max_history_items or settings.limits.max_history_items
         self.id = restored.conversation_id if restored else uuid4().hex
         self._created_at = restored.created_at if restored else time()
@@ -145,17 +142,7 @@ class ConversationSession:
         with self._lock:
             if client_message_id is not None and client_message_id in self._client_message_ids:
                 return True
-            if self._deleted or self._state in {
-                ConversationState.CLOSED,
-                ConversationState.LIMIT_REACHED,
-            }:
-                return False
-            if self._turn_count + len(self._queue) >= self._max_turns:
-                self._state = ConversationState.LIMIT_REACHED
-                self.publish(
-                    "conversation_limit_reached",
-                    {"max_turns": self._max_turns, "reason": "turn_limit"},
-                )
+            if self._deleted or self._state is ConversationState.CLOSED:
                 return False
             self._queue.append(text)
             if client_message_id is not None:
@@ -280,8 +267,7 @@ class ConversationSession:
                 "conversation_id": self.id,
                 "workspace": str(self.workspace),
                 "state": self._state.value,
-                "turn_count": self._turn_count,
-                "max_turns": self._max_turns,
+                "latest_event_sequence": len(self._events),
                 "queued_messages": len(self._queue),
                 "history_items": self._history_item_count(),
                 "max_history_items": self._max_history_items,
@@ -313,7 +299,6 @@ class ConversationSession:
             )
         }
         self._turn_count = restored.turn_count
-        self._max_turns = restored.max_turns
         self._max_history_items = restored.max_history_items
         self._latest_result_data = dict(restored.latest_result) if restored.latest_result else None
         self._turn_traces = {
@@ -446,7 +431,6 @@ class ConversationSession:
                 created_at=self._created_at,
                 state=self._state.value,
                 turn_count=self._turn_count,
-                max_turns=self._max_turns,
                 max_history_items=self._max_history_items,
                 transcript=_export_history(self._llm),
                 latest_result=self._latest_result_data or _result_data(self._latest_result),
@@ -528,13 +512,11 @@ class ConversationManager:
         workspace: Path,
         *,
         approval_factory: ApprovalFactory | None = None,
-        max_turns: int | None = None,
         max_history_items: int | None = None,
     ) -> None:
         self._settings = settings
         self._workspace = workspace.resolve()
         self._approval_factory = approval_factory
-        self._max_turns = max_turns
         self._max_history_items = max_history_items
         self._execution_lock = Lock()
         self._store = ConversationStore(self._workspace)
@@ -597,7 +579,6 @@ class ConversationManager:
             execution_lock=self._execution_lock,
             store=self._store,
             approval_factory=approval_factory or self._approval_factory,
-            max_turns=self._max_turns,
             max_history_items=self._max_history_items,
             restored=restored,
         )
@@ -606,6 +587,10 @@ class ConversationManager:
 def _stored_state(value: str) -> ConversationState:
     """Convert a database state string into the current explicit lifecycle enum."""
 
+    # Earlier versions persisted this terminal state after a session-wide turn
+    # cap. The cap is gone, so those sessions can safely accept new messages.
+    if value == "limit_reached":
+        return ConversationState.IDLE
     try:
         return ConversationState(value)
     except ValueError as error:

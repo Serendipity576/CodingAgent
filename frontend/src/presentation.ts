@@ -24,7 +24,6 @@ export function eventLabel(event: string): string {
     conversation_interrupted: "服务重启后会话已中断",
     approval_required: "等待高风险操作确认",
     approval_resolved: "高风险操作已处理",
-    conversation_limit_reached: "会话已达到上限",
     turn_cancel_requested: "已请求取消",
     conversation_closed: "会话已关闭",
   };
@@ -47,7 +46,6 @@ export function stateLabel(state: ConversationState): string {
     running: "正在执行",
     interrupted: "已中断，可继续",
     closed: "已关闭",
-    limit_reached: "已达上限",
   };
   return labels[state];
 }
