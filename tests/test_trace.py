@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from agent.trace import TurnTraceRecorder, public_turn_trace, trace_item_detail
+from agent.tools.base import ToolResult
 
 
 class TurnTraceRecorderTests(unittest.TestCase):
@@ -59,3 +60,34 @@ class TurnTraceRecorderTests(unittest.TestCase):
 
         self.assertNotIn("request", public["items"][0])
         self.assertEqual(detail["attributes"]["context"]["summary_version"], 2)
+
+    def test_tool_trace_exposes_safe_sandbox_facts(self) -> None:
+        """The trace identifies isolation without copying arbitrary tool metadata."""
+
+        trace = TurnTraceRecorder(
+            conversation_id="conversation-1",
+            turn_id=1,
+            on_change=lambda _: None,
+        )
+        item_id = trace.tool_started(
+            step=1,
+            parent_id=None,
+            call=type("Call", (), {"name": "run_command", "arguments": {}})(),
+        )
+        trace.tool_finished(
+            item_id,
+            result=ToolResult.succeeded(
+                "exit code: 0",
+                metadata={
+                    "execution_scope": "sandbox",
+                    "network": "disabled",
+                    "internal_note": "must not appear",
+                },
+            ),
+            duration_ms=15,
+        )
+
+        item = public_turn_trace(trace.snapshot())["items"][0]
+        self.assertEqual(item["attributes"]["execution"]["execution_scope"], "sandbox")
+        self.assertEqual(item["attributes"]["execution"]["network"], "disabled")
+        self.assertNotIn("internal_note", item["attributes"]["execution"])

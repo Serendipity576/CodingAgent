@@ -196,6 +196,9 @@ class TurnTraceRecorder:
         }
         if isinstance(metadata, Mapping) and "normalization" in metadata:
             attributes["normalization"] = metadata["normalization"]
+        execution = _execution_attributes(metadata)
+        if execution:
+            attributes["execution"] = execution
         if isinstance(error, str) and error:
             attributes["error"] = error
         invalid_arguments = _is_invalid_argument_failure(
@@ -411,6 +414,25 @@ def _is_sensitive_key(key: str) -> bool:
         normalized in _SENSITIVE_KEY_NAMES
         or normalized.endswith(("_api_key", "_password", "_secret"))
     )
+
+
+def _execution_attributes(metadata: object) -> dict[str, object]:
+    """Expose safe command-isolation facts without recording arbitrary metadata."""
+
+    if not isinstance(metadata, Mapping):
+        return {}
+    allowed_names = {
+        "execution_scope",
+        "sandbox",
+        "sandbox_available",
+        "network",
+        "workspace_access",
+        "masked_path_count",
+        "cancelled",
+        "timed_out",
+        "exit_code",
+    }
+    return {name: metadata[name] for name in allowed_names if name in metadata}
 
 
 def _is_invalid_argument_failure(*, decision: object, policy: object, error: object) -> bool:

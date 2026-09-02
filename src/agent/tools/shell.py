@@ -8,6 +8,7 @@ import signal
 import subprocess
 from time import monotonic
 
+from agent.sandbox import BubblewrapSandbox, CommandSandbox, SandboxUnavailableError
 from agent.tools.base import ToolContext, ToolError, ToolResult, truncate_text
 
 
@@ -30,10 +31,26 @@ class RunCommandTool:
         "additionalProperties": False,
     }
 
+    def __init__(self, sandbox: CommandSandbox | None = None) -> None:
+        """Use Bubblewrap by default; tests may inject a sandbox test double."""
+
+        self._sandbox = sandbox or BubblewrapSandbox()
+
     def execute(
         self, arguments: Mapping[str, object], context: ToolContext
     ) -> ToolResult:
         command = _command_argument(arguments)
+        try:
+            invocation = self._sandbox.prepare(command, context.workspace)
+        except SandboxUnavailableError as error:
+            return ToolResult.failed(
+                f"default command sandbox unavailable: {error}",
+                metadata={
+                    "execution_scope": "sandbox",
+                    "sandbox": "bubblewrap",
+                    "sandbox_available": False,
+                },
+            )
         process_options: dict[str, object] = {
             "cwd": context.workspace,
             "stdout": subprocess.PIPE,
@@ -47,9 +64,11 @@ class RunCommandTool:
             # started by an otherwise allowed test or build command.
             process_options["start_new_session"] = True
         try:
-            process = subprocess.Popen(command, **process_options)
+            process = subprocess.Popen(invocation.command, **process_options)
         except OSError as error:
-            return ToolResult.failed(f"could not start command: {error}")
+            return ToolResult.failed(
+                f"could not start sandboxed command: {error}", metadata=invocation.metadata
+            )
 
         started_at = monotonic()
         while True:
@@ -63,13 +82,13 @@ class RunCommandTool:
                         status="cancelled by user",
                         limit=context.limits.max_output_chars,
                     ),
-                    metadata={"cancelled": True},
+                    metadata={**invocation.metadata, "cancelled": True},
                 )
             elapsed = monotonic() - started_at
             remaining = context.limits.command_timeout_seconds - elapsed
             if remaining <= 0:
                 stdout, stderr = _stop_process(process)
-                return _timeout_result(stdout, stderr, context)
+                return _timeout_result(stdout, stderr, context, invocation.metadata)
             try:
                 stdout, stderr = process.communicate(timeout=min(0.1, remaining))
                 break
@@ -86,12 +105,19 @@ class RunCommandTool:
             return ToolResult.failed(
                 f"command exited with code {process.returncode}",
                 output,
-                metadata={"exit_code": process.returncode},
+                metadata={**invocation.metadata, "exit_code": process.returncode},
             )
-        return ToolResult.succeeded(output, metadata={"exit_code": process.returncode})
+        return ToolResult.succeeded(
+            output, metadata={**invocation.metadata, "exit_code": process.returncode}
+        )
 
 
-def _timeout_result(stdout: str, stderr: str, context: ToolContext) -> ToolResult:
+def _timeout_result(
+    stdout: str,
+    stderr: str,
+    context: ToolContext,
+    metadata: Mapping[str, object],
+) -> ToolResult:
     """Return a normal observation for a command stopped at its time limit."""
 
     output = _command_output(
@@ -100,7 +126,9 @@ def _timeout_result(stdout: str, stderr: str, context: ToolContext) -> ToolResul
         status=f"timed out after {context.limits.command_timeout_seconds} seconds",
         limit=context.limits.max_output_chars,
     )
-    return ToolResult.failed("command timed out", output, metadata={"timed_out": True})
+    return ToolResult.failed(
+        "command timed out", output, metadata={**metadata, "timed_out": True}
+    )
 
 
 def _stop_process(process: subprocess.Popen[str]) -> tuple[str, str]:
@@ -147,4 +175,3 @@ def _command_output(*, stdout: str, stderr: str, status: str, limit: int) -> str
     if stderr:
         sections.extend(("stderr:", stderr))
     return truncate_text("\n".join(sections), limit)
-
