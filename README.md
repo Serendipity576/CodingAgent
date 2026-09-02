@@ -11,6 +11,28 @@
 - 高风险调用需逐次人工批准，命令默认运行在无网络的 Bubblewrap 沙箱中；
 - Web 页面可查看会话、执行进度、脱敏后的模型请求/响应及工具详情。
 
+## 架构
+
+```mermaid
+flowchart TB
+    User[用户] --> Entry[CLI / 终端对话 / 本地 Web]
+    Entry --> Runtime[Agent Runtime<br/>任务循环与终止条件]
+
+    Runtime --> LLM[LLM Client<br/>本地历史与上下文预算]
+    LLM <--> Provider[兼容 Responses API 的模型服务]
+
+    Runtime --> Registry[Tool Registry]
+    Registry --> Policy[确定性策略<br/>ALLOW / APPROVAL / DENY]
+    Policy --> Files[文件工具<br/>workspace 内读写]
+    Policy --> Command[命令工具<br/>Bubblewrap 沙箱]
+    Command --> Workspace[指定 workspace]
+    Files --> Workspace
+
+    Runtime --> LocalData[本地 SQLite 会话、Trace<br/>JSONL 审计日志]
+```
+
+模型只生成回复或工具调用请求；运行时和策略层决定请求能否执行。模型服务不保存会话状态，命令也不会直接在宿主机环境中运行。
+
 ## 安装
 
 要求 Python 3.10+；需要执行本地命令时还需要 Linux、`bwrap` 和可用的用户命名空间。
